@@ -7,6 +7,14 @@ from collections.abc import Sequence
 from pathlib import Path
 
 from sibyl import __version__
+from sibyl.experiments.transcription_reread import (
+    DEFAULT_OUTPUT as REREAD_DEFAULT_OUTPUT,
+)
+from sibyl.experiments.transcription_reread import (
+    DEFAULT_REREADS,
+    format_reread_result,
+    run_reread_experiment,
+)
 from sibyl.experiments.transcription_variance import (
     DEFAULT_OUTPUT,
     format_variance_result,
@@ -49,6 +57,26 @@ def build_parser() -> argparse.ArgumentParser:
             "(default: .sibyl/experiments/transcription-variance.json)"
         ),
     )
+    reread = experiment_commands.add_parser(
+        "transcription-reread", help="reread page regions with disagreeing observations"
+    )
+    reread.add_argument("image", type=Path, help="page image")
+    reread.add_argument("--runs", type=int, help="number of page transcription runs")
+    reread.add_argument(
+        "--rereads",
+        type=int,
+        default=DEFAULT_REREADS,
+        help=f"targeted rereads per disagreement (default: {DEFAULT_REREADS})",
+    )
+    reread.add_argument(
+        "--output",
+        type=Path,
+        default=None,
+        help=(
+            "experimental JSON output path "
+            "(default: .sibyl/experiments/transcription-reread.json)"
+        ),
+    )
     run_parser = commands.add_parser("run", help="transform one handwritten page")
     run_parser.add_argument("image", type=Path, help="page image")
     output = run_parser.add_mutually_exclusive_group()
@@ -80,6 +108,18 @@ def main(argv: Sequence[str] | None = None) -> int:
             print(f"sibyl: error: {error}", file=__import__("sys").stderr)
             return 2
         print(format_variance_result(variance_result))
+    if arguments.command == "experiment" and arguments.experiment_name == "transcription-reread":
+        try:
+            reread_result = run_reread_experiment(
+                arguments.image,
+                runs=arguments.runs,
+                rereads=arguments.rereads,
+                output_path=arguments.output or REREAD_DEFAULT_OUTPUT,
+            )
+        except (FileNotFoundError, RuntimeError, ValueError) as error:
+            print(f"sibyl: error: {error}", file=__import__("sys").stderr)
+            return 2
+        print(format_reread_result(reread_result))
     if arguments.command == "run":
         try:
             page = transform_page(arguments.image)

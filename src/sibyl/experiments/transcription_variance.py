@@ -41,6 +41,7 @@ class VarianceRun:
     text: str | None
     raw_response: Any
     duration_ms: float
+    lines: list[str] | None = None
     error: str | None = None
 
 
@@ -58,6 +59,9 @@ class VarianceResult:
     runs: list[VarianceRun]
     comparison: dict[str, Any]
     failure_summary: dict[str, int]
+
+
+PreparedObserver = Callable[[Image.Image, PreparedVlmImage], None]
 
 
 def requested_runs(value: int | None = None) -> int:
@@ -97,6 +101,18 @@ def _page_text(interpretation: dict[str, Any]) -> str:
     return "\n".join(page_text)
 
 
+def _page_lines(interpretation: dict[str, Any]) -> list[str]:
+    page_text = interpretation.get("page_text")
+    if not isinstance(page_text, list):
+        page_interpretation = interpretation.get("page_interpretation", {})
+        page_text = (
+            page_interpretation.get("text", []) if isinstance(page_interpretation, dict) else []
+        )
+    if not isinstance(page_text, list) or not all(isinstance(item, str) for item in page_text):
+        raise ValueError("valid structured response did not contain page text")
+    return page_text
+
+
 def _raw_from_interpreter(interpreter: PageTranscriber, interpretation: dict[str, Any]) -> Any:
     if "raw_response" in interpretation:
         return interpretation["raw_response"]
@@ -121,6 +137,8 @@ def run_variance_experiment(
     output_path: Path = DEFAULT_OUTPUT,
     interpreter_factory: Callable[[Callable[[dict[str, Any]], None]], PageTranscriber]
     | None = None,
+    prepared_observer: PreparedObserver | None = None,
+    write_output: bool = True,
 ) -> VarianceResult:
     """Run repeated page transcription on one prepared image, never drawing localization."""
     if not image_path.is_file():
@@ -133,6 +151,8 @@ def run_variance_experiment(
         raise ValueError(f"Unable to read image: {image_path}") from error
 
     prepared = prepare_page_image_with_metadata(source)
+    if prepared_observer is not None:
+        prepared_observer(source, prepared)
     image_hash = prepared_image_hash(prepared)
     raw_response: Any = None
 
@@ -174,6 +194,7 @@ def run_variance_experiment(
                             text=_page_text(interpretation),
                             raw_response=raw,
                             duration_ms=round(duration_ms, 3),
+                            lines=_page_lines(interpretation),
                         )
                     )
             except (RuntimeError, ValueError) as error:
@@ -225,8 +246,9 @@ def run_variance_experiment(
         comparison=comparison,
         failure_summary=failure_summary,
     )
-    output_path.parent.mkdir(parents=True, exist_ok=True)
-    output_path.write_text(json.dumps(asdict(result), indent=2) + "\n", encoding="utf-8")
+    if write_output:
+        output_path.parent.mkdir(parents=True, exist_ok=True)
+        output_path.write_text(json.dumps(asdict(result), indent=2) + "\n", encoding="utf-8")
     return result
 
 
