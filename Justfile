@@ -31,4 +31,4 @@ check: venv
     UV_CACHE_DIR=/tmp/sibyl-uv-cache uv run mypy
 
 run *ARGS: venv
-    UV_CACHE_DIR=/tmp/sibyl-uv-cache uv run sibyl {{ARGS}}
+    UV_CACHE_DIR=/tmp/sibyl-uv-cache uv run sibyl run {{ARGS}}

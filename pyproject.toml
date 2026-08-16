@@ -1,7 +1,7 @@
 [project]
 name = "sibyl"
 version = "0.1.0"
-description = "Faithful recovery of handwritten material into structured digital artifacts."
+description = "Faithful transform of handwritten material into structured digital artifacts."
 readme = "README.md"
 requires-python = ">=3.13"
 dependencies = [

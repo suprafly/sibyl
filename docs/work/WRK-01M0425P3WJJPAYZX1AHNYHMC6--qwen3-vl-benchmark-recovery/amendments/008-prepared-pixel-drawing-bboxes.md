@@ -5,7 +5,7 @@ bounding boxes and bounding boxes expressed directly in the prepared VLM image
 dimensions. Coordinate space must be classified deterministically, preserved
 as provenance, validated against the prepared image, and interpreted before the
 existing padding, prepared-to-source mapping, original-source crop, and
-Markdown projection steps. Page-level recovery, TrOCR behavior, prompts,
+Markdown projection steps. Page-level transform, TrOCR behavior, prompts,
 preparation dimensions, and architecture decisions remain unchanged.
 
 Regression coverage must include the observed prepared-image fixture

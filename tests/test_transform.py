@@ -6,17 +6,17 @@ from typing import Any, ClassVar
 import pytest
 from PIL import Image
 
-from sibyl.recovery import (
+from sibyl.transform import (
     OllamaDrawingLocalizer,
     OllamaPageInterpreter,
     RegionBounds,
-    format_recovery,
+    format_transform,
     map_prepared_bounds,
     pad_normalized_bounds,
     pad_prepared_bounds,
     prepare_vlm_image,
-    recover_page,
-    write_markdown_recovery,
+    transform_page,
+    write_markdown_transform,
 )
 
 
@@ -236,7 +236,7 @@ def test_qwen_valid_but_unsupported_json_is_distinguished(monkeypatch: Any) -> N
     )
     result, _ = OllamaPageInterpreter(model="test").interpret(Image.new("L", (20, 20)))
     assert result["status"] == "failure"
-    assert "valid JSON but unsupported recovery schema" in result["error"]
+    assert "valid JSON but unsupported transform schema" in result["error"]
     assert "page_interpretation" in result["error"]
 
 
@@ -458,7 +458,7 @@ def test_page_level_text_does_not_trigger_trocr_or_fake_spatial_regions(
 ) -> None:
     image_path = tmp_path / "page.png"
     Image.new("RGB", (3900, 5200), "white").save(image_path)
-    page = recover_page(image_path, PageLevelTextInterpreter(), FailingRecognizer())
+    page = transform_page(image_path, PageLevelTextInterpreter(), FailingRecognizer())
     assert page.page_text == ["Xylem", "N -> H -> H"]
     assert len(page.regions) == 3
     assert all(region.kind == "figure" for region in page.regions)
@@ -478,14 +478,14 @@ def test_page_level_text_does_not_trigger_trocr_or_fake_spatial_regions(
         RegionBounds(2074, 3831, 2313, 4540),
         RegionBounds(2679, 3760, 2902, 4540),
     ]
-    markdown = write_markdown_recovery(page).read_text()
+    markdown = write_markdown_transform(page).read_text()
     assert all(f"assets/figure-{index:02d}.png" in markdown for index in range(1, 4))
 
 
 def test_figure_crops_use_mapped_original_coordinates_and_record_benchmark(tmp_path: Path) -> None:
     image_path = tmp_path / "page.png"
     Image.new("RGB", (3900, 5200), "white").save(image_path)
-    page = recover_page(image_path, FigureInterpreter(), FailingRecognizer())
+    page = transform_page(image_path, FigureInterpreter(), FailingRecognizer())
     region = page.regions[0]
     assert region.prepared_bounds == RegionBounds(327, 707, 887, 875)
     assert region.bounds == RegionBounds(830, 1795, 2252, 2222)
@@ -497,13 +497,13 @@ def test_figure_crops_use_mapped_original_coordinates_and_record_benchmark(tmp_p
     assert benchmark["qwen_ms"] == 14393.5
     assert benchmark["region_count"] == 1
     assert benchmark["trocr_timings"] == []
-    assert benchmark["total_recovery_ms"] > 0
+    assert benchmark["total_transform_ms"] > 0
 
 
-def test_recovery_preserves_source_qwen_text_and_recognizer_evidence(tmp_path: Path) -> None:
+def test_runy_preserves_source_qwen_text_and_recognizer_evidence(tmp_path: Path) -> None:
     image_path = tmp_path / "page.png"
     Image.new("RGB", (100, 100), "white").save(image_path)
-    page = recover_page(
+    page = transform_page(
         image_path,
         FakeInterpreter(),
         FakeRecognizer(),
@@ -513,7 +513,7 @@ def test_recovery_preserves_source_qwen_text_and_recognizer_evidence(tmp_path: P
     assert page.regions[0].qwen_text == "Calamodin"
     assert page.regions[0].text == "Calamondin"
     assert page.regions[0].bounds.left == 10
-    assert json.loads(format_recovery(page))["regions"][0]["source"]["image"] == str(image_path)
+    assert json.loads(format_transform(page))["regions"][0]["source"]["image"] == str(image_path)
 
 
 class PageOnlyInterpreter:
@@ -577,7 +577,7 @@ def test_dedicated_localization_preserves_text_descriptions_coordinates_and_mark
     source = Image.new("RGB", (100, 100), "white")
     source.putpixel((50, 50), (255, 0, 0))
     source.save(image_path)
-    page = recover_page(
+    page = transform_page(
         image_path,
         PageOnlyInterpreter(),
         FailingRecognizer(),
@@ -599,13 +599,13 @@ def test_dedicated_localization_preserves_text_descriptions_coordinates_and_mark
     assert first.bounds == RegionBounds(39, 39, 61, 61)
     assert Image.open(first.source["crop"]).size == (22, 22)
     benchmark = page.runtime["benchmark"]
-    assert benchmark["page_recovery_ms"] == 11.0
+    assert benchmark["page_transform_ms"] == 11.0
     assert benchmark["drawing_localization_ms"] == 7.0
     assert benchmark["crop_ms"] >= 0
     assert benchmark["trocr_attempts"] == 0
-    assert page.runtime["page_recovery"]["status"] == "success"
+    assert page.runtime["page_transform"]["status"] == "success"
     assert page.runtime["drawing_localization"]["status"] == "success"
-    markdown = write_markdown_recovery(page).read_text()
+    markdown = write_markdown_transform(page).read_text()
     assert "Exact page text" in markdown
     assert "![Figure 1](assets/figure-01.png)" in markdown
     assert "model evidence" not in markdown
@@ -616,7 +616,7 @@ def test_prepared_pixel_bbox_maps_and_crops_original_source_for_markdown(
 ) -> None:
     image_path = tmp_path / "page.png"
     Image.new("RGB", (3900, 5200), "white").save(image_path)
-    page = recover_page(
+    page = transform_page(
         image_path,
         PageOnlyInterpreter(),
         FailingRecognizer(),
@@ -631,7 +631,7 @@ def test_prepared_pixel_bbox_maps_and_crops_original_source_for_markdown(
     assert region.source["model_bbox"] == [330, 707, 887, 872]
     assert region.source["bbox_coordinate_space"] == "prepared_pixels"
     assert Image.open(region.source["crop"]).size == (1556, 459)
-    assert write_markdown_recovery(page).read_text() == (
+    assert write_markdown_transform(page).read_text() == (
         "Exact page text\n\n![Figure 1](assets/figure-01.png)\n"
     )
 
@@ -639,7 +639,7 @@ def test_prepared_pixel_bbox_maps_and_crops_original_source_for_markdown(
 def test_drawing_localization_failure_preserves_successful_page_text(tmp_path: Path) -> None:
     image_path = tmp_path / "page.png"
     Image.new("RGB", (100, 100), "white").save(image_path)
-    page = recover_page(
+    page = transform_page(
         image_path,
         PageOnlyInterpreter(),
         FailingRecognizer(),
@@ -659,10 +659,10 @@ def test_drawing_localization_failure_preserves_successful_page_text(tmp_path: P
     assert page.runtime["benchmark"]["drawing_regions"] == 0
 
 
-def test_zero_drawings_is_a_successful_text_only_recovery(tmp_path: Path) -> None:
+def test_zero_drawings_is_a_successful_text_only_transform(tmp_path: Path) -> None:
     image_path = tmp_path / "page.png"
     Image.new("RGB", (100, 100), "white").save(image_path)
-    page = recover_page(
+    page = transform_page(
         image_path,
         PageOnlyInterpreter(),
         FailingRecognizer(),

@@ -8,18 +8,18 @@ from pathlib import Path
 
 from sibyl import __version__
 from sibyl.experiments.trocr import format_result, run_experiment
-from sibyl.recovery import (
-    format_recovery,
-    format_text_recovery,
-    recover_page,
-    write_markdown_recovery,
+from sibyl.transform import (
+    format_text_transform,
+    format_transform,
+    transform_page,
+    write_markdown_transform,
 )
 
 
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="sibyl",
-        description="Faithful recovery of handwritten material into structured artifacts.",
+        description="Faithful transform of handwritten material into structured artifacts.",
     )
     parser.add_argument("--version", action="store_true", help="show the executable version")
     commands = parser.add_subparsers(dest="command")
@@ -30,11 +30,11 @@ def build_parser() -> argparse.ArgumentParser:
     )
     trocr.add_argument("image", type=Path, help="image containing one handwritten line or crop")
     trocr.add_argument("--json", action="store_true", help="emit the result as JSON")
-    recover_parser = commands.add_parser("recover", help="recover one handwritten page")
-    recover_parser.add_argument("image", type=Path, help="page image")
-    output = recover_parser.add_mutually_exclusive_group()
+    run_parser = commands.add_parser("run", help="transform one handwritten page")
+    run_parser.add_argument("image", type=Path, help="page image")
+    output = run_parser.add_mutually_exclusive_group()
     output.add_argument("--markdown", action="store_true", help="write a Markdown projection")
-    output.add_argument("--json", action="store_true", help="emit the structured recovery JSON")
+    output.add_argument("--json", action="store_true", help="emit the structured transform JSON")
     return parser
 
 
@@ -50,16 +50,16 @@ def main(argv: Sequence[str] | None = None) -> int:
             print(f"sibyl: error: {error}", file=__import__("sys").stderr)
             return 2
         print(format_result(result, arguments.json))
-    if arguments.command == "recover":
+    if arguments.command == "run":
         try:
-            page = recover_page(arguments.image)
+            page = transform_page(arguments.image)
             if arguments.json:
-                print(format_recovery(page))
+                print(format_transform(page))
             elif arguments.markdown:
-                output_path = write_markdown_recovery(page)
-                print(f"wrote recovery projections: {output_path.parent}")
+                output_path = write_markdown_transform(page)
+                print(f"wrote transform projections: {output_path.parent}")
             else:
-                print(format_text_recovery(page))
+                print(format_text_transform(page))
         except (FileNotFoundError, RuntimeError, ValueError) as error:
             print(f"sibyl: error: {error}", file=__import__("sys").stderr)
             return 2

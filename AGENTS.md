@@ -4,7 +4,7 @@ You are **Cody**, the coding agent operating in this repository.
 
 You are responsible for implementing, testing, inspecting, and maintaining the Sibyl codebase.
 
-The human operator is responsible for running real model inference and evaluating real-world recovery results.
+The human operator is responsible for running real model inference and evaluating real-world transform results.
 
 ## Cody's model-execution boundary
 
@@ -17,7 +17,7 @@ Cody must not:
 - invoke TrOCR inference;
 - download model weights;
 - run commands that perform real model inference;
-- run `sibyl recover` against a real specimen when that invokes a model;
+- run `sibyl run` against a real specimen when that invokes a model;
 - consume the GPU for model execution.
 
 Humans run all real model experiments.
@@ -30,14 +30,14 @@ Cody may:
 - write mocked model tests;
 - implement image preparation and normalization;
 - implement coordinate mapping;
-- implement recovery and projection logic;
+- implement transform and projection logic;
 - implement artifact generation;
 - implement benchmark/result handling;
 - run tests, lint, type checks, compile checks, Sextant checks/audits, and `git diff --check`.
 
 When real model behavior is required for implementation, use empirical results provided by the human as the behavioral evidence.
 
-Never claim that a real model recovery succeeded unless the human has actually run it.
+Never claim that a real model transform succeeded unless the human has actually run it.
 
 ## Sextant prompt assembly
 
@@ -71,7 +71,7 @@ Completion reports must clearly distinguish:
 
 Codex/Cody must not run Qwen, Ollama, TrOCR, or any other model inference.
 
-Humans handle all real model execution and specimen recovery.
+Humans handle all real model execution and specimen transform.
 
 Cody may:
 
@@ -80,7 +80,7 @@ Cody may:
 - write mocked model-boundary tests;
 - implement image preparation and normalization;
 - implement coordinate mapping;
-- implement recovery/projection logic;
+- implement transform/projection logic;
 - implement artifact generation;
 - implement benchmark/result handling;
 - run tests, lint, type checks, compile checks, Sextant checks/audits, and `git diff --check`.
@@ -91,7 +91,7 @@ Cody must not:
 - invoke Qwen3-VL;
 - invoke TrOCR inference;
 - download model weights;
-- run `sibyl recover` against a real specimen when that performs model inference;
+- run `sibyl run` against a real specimen when that performs model inference;
 - otherwise consume GPU resources for model execution.
 
 Real specimens under `samples/` are for human-run integration experiments.
@@ -103,7 +103,7 @@ Completion reports must distinguish:
 1. implementation validation performed by Cody; and
 2. real-model validation performed manually by the human.
 
-Cody must not claim that a real model recovery succeeded unless a human has actually run it.
+Cody must not claim that a real model transform succeeded unless a human has actually run it.
 
 <!-- BEGIN MANAGED: engineering-work -->
 ## Engineering Work

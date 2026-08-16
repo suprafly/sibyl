@@ -1,21 +1,21 @@
 # Sibyl
 
-Sibyl is a local-first Python system for faithfully recovering handwritten
-material into structured digital artifacts. Original scans and photographs
-remain authoritative. Recovery preserves wording, visual material, spatial
+Sibyl is a local-first Python system for transforming handwritten source
+imagery into structured digital artifacts. Original scans and photographs
+remain authoritative. The transform preserves wording, visual material, spatial
 relationships, provenance, and explicit uncertainty; Markdown/Obsidian and
 JSON are downstream projections, never the canonical artifact.
 
 The repository includes a narrow TrOCR experiment for measuring one handwritten
 line or manually selected line crop. It is not whole-page OCR.
 
-## One-page recovery
+## One-page transform
 
-Recover one page to a provider-independent JSON artifact with the local Qwen3-VL
+Run one page to a provider-independent JSON artifact with the local Qwen3-VL
 Ollama service followed by cropped-region TrOCR recognition:
 
 ```sh
-just run recover samples/Grafting-101-page-003.png
+just run samples/Grafting-101-page-003.png
 ```
 
 The source image remains authoritative. Qwen receives an in-memory grayscale
@@ -35,10 +35,10 @@ just venv
 just test
 just lint
 just build
-just run --version
+just --version
 ```
 
-See [the architecture and recovery vocabulary](docs/architecture.md).
+See [the architecture and transform vocabulary](docs/architecture.md).
 
 See [development environment setup](docs/development.md) for reproducible
 Python/ML dependencies, CUDA verification, and explicit TrOCR bootstrap.

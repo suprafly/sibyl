@@ -1,8 +1,8 @@
 # Amendment: revert spatial-text expansion
 
-The current Qwen recovery boundary must request and normalize page-level
+The current Qwen transform boundary must request and normalize page-level
 `text[]` plus spatial `drawing[]` with normalized bounding boxes. It must not
-ask Qwen3-VL 8B to enumerate spatial text regions or make recovery depend on
+ask Qwen3-VL 8B to enumerate spatial text regions or make transform depend on
 spatial text localization. Page-level text is preserved exactly, does not
 trigger TrOCR, and is projected directly by the default and Markdown outputs.
 Legitimate drawing boxes continue to map through prepared-image coordinates to

@@ -1,4 +1,4 @@
-"""One-page recovery orchestration and provider boundaries."""
+"""One-page transform orchestration and provider boundaries."""
 
 from __future__ import annotations
 
@@ -48,7 +48,7 @@ class RegionCandidate:
 
 
 @dataclass(frozen=True)
-class RecoveredRegion:
+class TransformedRegion:
     order: int
     kind: str
     bounds: RegionBounds
@@ -62,11 +62,11 @@ class RecoveredRegion:
 
 
 @dataclass(frozen=True)
-class RecoveredPage:
+class TransformedPage:
     source: dict[str, Any]
     dimensions: dict[str, int]
     interpretation: dict[str, Any]
-    regions: list[RecoveredRegion]
+    regions: list[TransformedRegion]
     runtime: dict[str, Any]
     page_text: list[str] = field(default_factory=list)
 
@@ -320,7 +320,7 @@ class OllamaPageInterpreter:
             "required": ["page_interpretation"],
         }
         prompt = (
-            "Recover this handwritten page. Return only JSON matching the schema. "
+            "Transform this handwritten page. Return only JSON matching the schema. "
             "Return ordered page-level text exactly as visibly written in ordinary "
             "handwritten notes. Page text owns notes, not visual figures. Exclude "
             "diagram arrows, strokes, grafting cuts, lines forming a figure, visual "
@@ -373,7 +373,7 @@ class OllamaPageInterpreter:
         if result is None:
             if saw_json:
                 structured_error = (
-                    "Qwen returned valid JSON but unsupported recovery schema: "
+                    "Qwen returned valid JSON but unsupported transform schema: "
                     f"{unsupported_shape or 'unknown'}"
                 )
             else:
@@ -728,16 +728,16 @@ def _legacy_drawing_normalized(
     )
 
 
-def recover_page(
+def transform_page(
     image_path: Path,
     interpreter: PageInterpreter | None = None,
     recognizer: Recognizer | None = None,
     *,
     recognizer_metadata: dict[str, Any] | None = None,
     drawing_localizer: DrawingLocalizer | None = None,
-) -> RecoveredPage:
-    """Recover page text, then independently localize and crop its drawings."""
-    recovery_started = time.perf_counter()
+) -> TransformedPage:
+    """Transform page text, then independently localize and crop its drawings."""
+    transform_started = time.perf_counter()
     if not image_path.is_file():
         raise FileNotFoundError(f"Image not found: {image_path}")
     try:
@@ -749,7 +749,7 @@ def recover_page(
     prepared = prepare_vlm_image_with_metadata(source)
     supplied_interpreter = interpreter is not None
     interpreter = interpreter or OllamaPageInterpreter()
-    interpretation, page_recovery_ms = interpreter.interpret(prepared.image)
+    interpretation, page_transform_ms = interpreter.interpret(prepared.image)
     interpreter.release()
     if interpretation.get("status") == "failure":
         failure_error = interpretation.get("error", "Qwen interpretation failed")
@@ -840,7 +840,7 @@ def recover_page(
         }
     else:
         recognizer_metadata = recognizer_metadata or {}
-    regions: list[RecoveredRegion] = []
+    regions: list[TransformedRegion] = []
     artifact_directory = image_path.parent / f"{image_path.stem}.sibyl" / "assets"
     figure_count = 0
     disagreements: list[dict[str, Any]] = []
@@ -872,7 +872,7 @@ def recover_page(
             )
         source_metadata: dict[str, Any] = {"image": str(image_path), "bounds": asdict(bounds)}
         regions.append(
-            RecoveredRegion(
+            TransformedRegion(
                 order=int(raw.get("order", len(regions))),
                 kind=kind,
                 bounds=bounds,
@@ -968,7 +968,7 @@ def recover_page(
             "drawing_localization": localization_observation,
         }
         regions.append(
-            RecoveredRegion(
+            TransformedRegion(
                 order=order,
                 kind="figure",
                 bounds=bounds,
@@ -982,20 +982,20 @@ def recover_page(
         )
     crop_ms = (time.perf_counter() - crop_started) * 1000 if figure_count else 0.0
     response_metadata = getattr(interpreter, "response_metadata", {})
-    total_ms = (time.perf_counter() - recovery_started) * 1000
+    total_ms = (time.perf_counter() - transform_started) * 1000
     drawing_count = sum(region.kind == "figure" for region in regions)
     spatial_text_count = len(regions) - drawing_count
     runtime = {
         "vlm_model": getattr(interpreter, "model", None),
-        "vlm_ms": round(page_recovery_ms, 3),
+        "vlm_ms": round(page_transform_ms, 3),
         "vlm_dimensions": {
             "width": prepared.prepared_dimensions[0],
             "height": prepared.prepared_dimensions[1],
         },
-        "page_recovery": {
+        "page_transform": {
             "status": "success",
             "model": getattr(interpreter, "model", None),
-            "timing_ms": round(page_recovery_ms, 3),
+            "timing_ms": round(page_transform_ms, 3),
             "response_metadata": response_metadata,
         },
         "drawing_localization": {
@@ -1006,7 +1006,7 @@ def recover_page(
         "recognizer": recognizer_metadata,
         "benchmark": {
             "model": getattr(interpreter, "model", None),
-            "page_recovery_model": getattr(interpreter, "model", None),
+            "page_transform_model": getattr(interpreter, "model", None),
             "drawing_localization_model": getattr(drawing_localizer, "model", None),
             "runtime": "ollama",
             "preparation_dimensions": {
@@ -1016,8 +1016,8 @@ def recover_page(
             "source_dimensions": {"width": source.width, "height": source.height},
             "scale": prepared.scale,
             "preparation_ms": round(prepared.preparation_ms, 3),
-            "qwen_ms": round(page_recovery_ms, 3),
-            "page_recovery_ms": round(page_recovery_ms, 3),
+            "qwen_ms": round(page_transform_ms, 3),
+            "page_transform_ms": round(page_transform_ms, 3),
             "drawing_localization_ms": round(drawing_localization_ms, 3),
             "crop_ms": round(crop_ms, 3),
             "prompt_tokens": response_metadata.get("prompt_tokens"),
@@ -1027,11 +1027,11 @@ def recover_page(
             "drawing_regions": drawing_count,
             "trocr_attempts": len(trocr_timings),
             "trocr_timings": trocr_timings,
-            "total_recovery_ms": round(total_ms, 3),
+            "total_transform_ms": round(total_ms, 3),
         },
         "disagreements": disagreements,
     }
-    return RecoveredPage(
+    return TransformedPage(
         source={"image": str(image_path)},
         dimensions={"width": source.width, "height": source.height},
         interpretation=interpretation.get("page_interpretation", {}),
@@ -1043,22 +1043,22 @@ def recover_page(
     )
 
 
-def format_recovery(page: RecoveredPage) -> str:
+def format_transform(page: TransformedPage) -> str:
     return json.dumps(asdict(page), indent=2)
 
 
-def write_recovery_json(page: RecoveredPage) -> Path:
-    """Persist the complete structured recovery beside its projections."""
+def write_transform_json(page: TransformedPage) -> Path:
+    """Persist the complete structured transform beside its projections."""
     source_path = Path(page.source["image"])
     output_directory = source_path.parent / f"{source_path.stem}.sibyl"
     output_directory.mkdir(parents=True, exist_ok=True)
-    output_path = output_directory / "recovery.json"
-    output_path.write_text(f"{format_recovery(page)}\n", encoding="utf-8")
+    output_path = output_directory / "transform.json"
+    output_path.write_text(f"{format_transform(page)}\n", encoding="utf-8")
     return output_path
 
 
-def format_text_recovery(page: RecoveredPage) -> str:
-    """Project only recovered text, preserving model spelling and order."""
+def format_text_transform(page: TransformedPage) -> str:
+    """Project only transformed text, preserving model spelling and order."""
     lines: list[str] = list(page.page_text)
     for region in sorted(page.regions, key=lambda item: item.order):
         if region.kind == "figure" or not region.text:
@@ -1070,13 +1070,13 @@ def format_text_recovery(page: RecoveredPage) -> str:
     return "\n\n".join(lines)
 
 
-def write_markdown_recovery(page: RecoveredPage) -> Path:
+def write_markdown_transform(page: TransformedPage) -> Path:
     """Write the Markdown projection beside its original-resolution assets."""
     source_path = Path(page.source["image"])
     output_directory = source_path.parent / f"{source_path.stem}.sibyl"
     assets_directory = output_directory / "assets"
     output_directory.mkdir(parents=True, exist_ok=True)
-    write_recovery_json(page)
+    write_transform_json(page)
     markdown_lines: list[str] = list(page.page_text)
     figure_count = 0
     for region in sorted(page.regions, key=lambda item: item.order):
@@ -1101,6 +1101,6 @@ def write_markdown_recovery(page: RecoveredPage) -> Path:
             markdown_lines.append(f"- {region.text}")
         else:
             markdown_lines.append(region.text)
-    output_path = output_directory / "recovery.md"
+    output_path = output_directory / "transform.md"
     output_path.write_text("\n\n".join(markdown_lines) + "\n", encoding="utf-8")
     return output_path
