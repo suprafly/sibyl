@@ -4,7 +4,14 @@ version = "0.1.0"
 description = "Faithful recovery of handwritten material into structured digital artifacts."
 readme = "README.md"
 requires-python = ">=3.13"
-dependencies = []
+dependencies = [
+  "accelerate==1.14.0",
+  "pillow==12.3.0",
+  "sentencepiece==0.2.2",
+  "torch==2.13.0",
+  "torchvision==0.28.0",
+  "transformers==4.57.6",
+]
 
 [project.scripts]
 sibyl = "sibyl.cli:main"

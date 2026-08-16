@@ -23,3 +23,6 @@ just run --version
 ```
 
 See [the architecture and recovery vocabulary](docs/architecture.md).
+
+See [development environment setup](docs/development.md) for reproducible
+Python/ML dependencies, CUDA verification, and explicit TrOCR bootstrap.
