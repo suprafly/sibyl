@@ -50,7 +50,8 @@ just bootstrap-trocr
 
 This downloads `microsoft/trocr-large-handwritten` using the project
 environment. The model cache is external and machine-local; model weights must
-not be committed. No inference is implemented yet.
+not be committed. Run `just run experiment trocr path/to/line.png` for the
+single-line empirical experiment; it never downloads weights implicitly.
 
 Ollama and Qwen/VLM runtimes are separate optional future boundaries. They are
 not Python dependencies and are not installed or downloaded by Sibyl setup.

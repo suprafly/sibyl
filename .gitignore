@@ -6,3 +6,7 @@ __pycache__/
 .ruff_cache/
 dist/
 build/
+
+
+# Local experiment samples and generated artifacts
+samples/
