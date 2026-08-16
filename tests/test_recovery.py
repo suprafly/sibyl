@@ -1,7 +1,7 @@
 import json
 from io import BytesIO
 from pathlib import Path
-from typing import Any
+from typing import Any, ClassVar
 
 import pytest
 from PIL import Image
@@ -13,6 +13,7 @@ from sibyl.recovery import (
     format_recovery,
     map_prepared_bounds,
     pad_normalized_bounds,
+    pad_prepared_bounds,
     prepare_vlm_image,
     recover_page,
     write_markdown_recovery,
@@ -200,7 +201,16 @@ def test_drawing_localizer_accepts_content_json_and_uses_dedicated_schema(
     monkeypatch.setattr("urllib.request.urlopen", urlopen)
     localizer = OllamaDrawingLocalizer(model="test")
     result, _ = localizer.localize(Image.new("L", (1536, 2048)))
-    assert result == payload
+    assert result == {
+        "drawings": [
+            {
+                "bbox_2d": [0.1, 0.2, 0.8, 0.9],
+                "model_bbox": [0.1, 0.2, 0.8, 0.9],
+                "bbox_coordinate_space": "normalized",
+                "description": "complete figure",
+            }
+        ]
+    }
     assert requests[0]["format"]["required"] == ["drawings"]
     assert "ordinary handwriting" in requests[0]["messages"][0]["content"]
     assert "complete figure" in requests[0]["messages"][0]["content"]
@@ -213,7 +223,15 @@ def test_drawing_localizer_accepts_thinking_json(monkeypatch: Any) -> None:
         lambda request, timeout: _ollama_response({"content": "", "thinking": json.dumps(payload)}),
     )
     result, _ = OllamaDrawingLocalizer(model="test").localize(Image.new("L", (20, 20)))
-    assert result == {"drawings": [{"bbox_2d": [0.0, 0.0, 1.0, 1.0]}]}
+    assert result == {
+        "drawings": [
+            {
+                "bbox_2d": [0.0, 0.0, 1.0, 1.0],
+                "model_bbox": [0.0, 0.0, 1.0, 1.0],
+                "bbox_coordinate_space": "normalized",
+            }
+        ]
+    }
 
 
 def test_drawing_localizer_normalizes_established_bbox_alias(monkeypatch: Any) -> None:
@@ -226,8 +244,77 @@ def test_drawing_localizer_normalizes_established_bbox_alias(monkeypatch: Any) -
     )
     result, _ = OllamaDrawingLocalizer(model="test").localize(Image.new("L", (20, 20)))
     assert result == {
-        "drawings": [{"bbox_2d": [0.2, 0.3, 0.7, 0.8], "description": "existing fixture shape"}]
+        "drawings": [
+            {
+                "bbox_2d": [0.2, 0.3, 0.7, 0.8],
+                "model_bbox": [0.2, 0.3, 0.7, 0.8],
+                "bbox_coordinate_space": "normalized",
+                "description": "existing fixture shape",
+            }
+        ]
     }
+
+
+def test_drawing_localizer_accepts_observed_prepared_pixel_fixture(
+    monkeypatch: Any,
+) -> None:
+    payload = {
+        "drawings": [
+            {
+                "bbox_2d": [330, 707, 887, 872],
+                "description": (
+                    "Hand-drawn schematic of three vertical elements connected by arrows, "
+                    "with a labeled arrow pointing to the rightmost element"
+                ),
+            }
+        ]
+    }
+    monkeypatch.setattr(
+        "urllib.request.urlopen",
+        lambda request, timeout: _ollama_response({"content": json.dumps(payload)}),
+    )
+    result, _ = OllamaDrawingLocalizer(model="test").localize(Image.new("L", (1536, 2048)))
+    drawing = result["drawings"][0]
+    assert drawing["model_bbox"] == [330.0, 707.0, 887.0, 872.0]
+    assert drawing["bbox_coordinate_space"] == "prepared_pixels"
+    assert drawing["description"] == payload["drawings"][0]["description"]
+
+
+def test_drawing_localizer_accepts_prepared_pixel_bbox_alias(monkeypatch: Any) -> None:
+    payload = {"drawings": [{"bbox": [330, 707, 887, 872]}]}
+    monkeypatch.setattr(
+        "urllib.request.urlopen",
+        lambda request, timeout: _ollama_response({"content": json.dumps(payload)}),
+    )
+    result, _ = OllamaDrawingLocalizer(model="test").localize(Image.new("L", (1536, 2048)))
+    assert result["drawings"][0]["bbox_coordinate_space"] == "prepared_pixels"
+    assert result["drawings"][0]["model_bbox"] == [330.0, 707.0, 887.0, 872.0]
+
+
+@pytest.mark.parametrize(
+    "bbox",
+    ([0, -1, 10, 20], [0, 0, 1537, 2048], [10, 20, 10, 21], [0, 0, 0, 1]),
+)
+def test_drawing_localizer_rejects_invalid_coordinate_ranges(
+    monkeypatch: Any, bbox: list[int]
+) -> None:
+    payload = {"drawings": [{"bbox_2d": bbox}]}
+    monkeypatch.setattr(
+        "urllib.request.urlopen",
+        lambda request, timeout: _ollama_response({"content": json.dumps(payload)}),
+    )
+    result, _ = OllamaDrawingLocalizer(model="test").localize(Image.new("L", (1536, 2048)))
+    assert result["status"] == "failure"
+    assert "invalid bbox" in result["error"]
+
+
+def test_prepared_pixel_padding_preserves_pixel_space_and_clamps() -> None:
+    assert pad_prepared_bounds((330, 707, 887, 872), (1536, 2048)) == pytest.approx(
+        (302.15, 698.75, 914.85, 880.25)
+    )
+    assert pad_prepared_bounds((0, 0, 10, 20), (1536, 2048)) == pytest.approx(
+        (0, 0, 10.5, 21)
+    )
 
 
 def test_drawing_localizer_reports_valid_json_with_unsupported_entry(monkeypatch: Any) -> None:
@@ -240,6 +327,8 @@ def test_drawing_localizer_reports_valid_json_with_unsupported_entry(monkeypatch
     assert result["status"] == "failure"
     assert "valid drawing localization JSON" in result["error"]
     assert "drawing entry 0" in result["error"]
+    assert '"label": "not a supported drawing record"' in result["error"]
+    assert result["unsupported_entries"] == payload["drawings"]
 
 
 def test_drawing_localizer_distinguishes_missing_and_malformed_json(monkeypatch: Any) -> None:
@@ -405,6 +494,30 @@ class FakeDrawingLocalizer:
         pass
 
 
+class PreparedPixelDrawingLocalizer:
+    model = "fake-drawing-qwen"
+    response_metadata: ClassVar[dict[str, list[str]]] = {"response_fields": ["content"]}
+
+    def localize(self, image: Image.Image) -> tuple[dict[str, Any], float]:
+        assert image.size == (1536, 2048)
+        return (
+            {
+                "drawings": [
+                    {
+                        "bbox_2d": [330, 707, 887, 872],
+                        "model_bbox": [330, 707, 887, 872],
+                        "bbox_coordinate_space": "prepared_pixels",
+                        "description": "model evidence",
+                    }
+                ]
+            },
+            7.0,
+        )
+
+    def release(self) -> None:
+        pass
+
+
 def test_dedicated_localization_preserves_text_descriptions_coordinates_and_markdown(
     tmp_path: Path,
 ) -> None:
@@ -446,6 +559,31 @@ def test_dedicated_localization_preserves_text_descriptions_coordinates_and_mark
     assert "model evidence" not in markdown
 
 
+def test_prepared_pixel_bbox_maps_and_crops_original_source_for_markdown(
+    tmp_path: Path,
+) -> None:
+    image_path = tmp_path / "page.png"
+    Image.new("RGB", (3900, 5200), "white").save(image_path)
+    page = recover_page(
+        image_path,
+        PageOnlyInterpreter(),
+        FailingRecognizer(),
+        drawing_localizer=PreparedPixelDrawingLocalizer(),
+    )
+    region = page.regions[0]
+    assert region.normalized_bounds == pytest.approx(
+        (330 / 1536, 707 / 2048, 887 / 1536, 872 / 2048)
+    )
+    assert region.prepared_bounds == RegionBounds(302, 699, 915, 880)
+    assert region.bounds == RegionBounds(767, 1775, 2323, 2234)
+    assert region.source["model_bbox"] == [330, 707, 887, 872]
+    assert region.source["bbox_coordinate_space"] == "prepared_pixels"
+    assert Image.open(region.source["crop"]).size == (1556, 459)
+    assert write_markdown_recovery(page).read_text() == (
+        "Exact page text\n\n![Figure 1](assets/figure-01.png)\n"
+    )
+
+
 def test_drawing_localization_failure_preserves_successful_page_text(tmp_path: Path) -> None:
     image_path = tmp_path / "page.png"
     Image.new("RGB", (100, 100), "white").save(image_path)
@@ -454,13 +592,18 @@ def test_drawing_localization_failure_preserves_successful_page_text(tmp_path: P
         PageOnlyInterpreter(),
         FailingRecognizer(),
         drawing_localizer=FakeDrawingLocalizer(
-            {"status": "failure", "error": "mock localization unavailable"}
+            {
+                "status": "failure",
+                "error": "mock localization unavailable",
+                "unsupported_entries": [{"unexpected": "shape"}],
+            }
         ),
     )
     assert page.page_text == ["Exact page text"]
     assert page.regions == []
     assert page.runtime["drawing_localization"]["status"] == "failure"
     assert "unavailable" in page.runtime["drawing_localization"]["error"]
+    assert page.runtime["drawing_localization"]["unsupported_entries"] == [{"unexpected": "shape"}]
     assert page.runtime["benchmark"]["drawing_regions"] == 0
 
 

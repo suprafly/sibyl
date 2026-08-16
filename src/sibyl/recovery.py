@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import math
 import os
 import shutil
 import time
@@ -379,6 +380,32 @@ class OllamaPageInterpreter:
         return None
 
 
+def _drawing_bbox_coordinate_space(
+    bbox: Any, prepared_size: tuple[int, int]
+) -> str | None:
+    """Classify a drawing bbox without accepting out-of-domain coordinates."""
+    if not (
+        isinstance(bbox, list)
+        and len(bbox) == 4
+        and all(
+            isinstance(value, (int, float))
+            and not isinstance(value, bool)
+            and math.isfinite(value)
+            for value in bbox
+        )
+    ):
+        return None
+    if all(0 <= value <= 1 for value in bbox):
+        valid = bbox[0] < bbox[2] and bbox[1] < bbox[3]
+        return "normalized" if valid else None
+    width, height = prepared_size
+    valid = (
+        0 <= bbox[0] < bbox[2] <= width
+        and 0 <= bbox[1] < bbox[3] <= height
+    )
+    return "prepared_pixels" if valid else None
+
+
 class OllamaDrawingLocalizer:
     """Dedicated Qwen3-VL boundary for semantic drawing localization."""
 
@@ -389,51 +416,56 @@ class OllamaDrawingLocalizer:
         self.response_metadata: dict[str, Any] = {}
 
     @staticmethod
-    def _normalize_result(result: Any) -> tuple[dict[str, Any] | None, str | None]:
+    def _normalize_result(
+        result: Any,
+        prepared_size: tuple[int, int],
+    ) -> tuple[dict[str, Any] | None, str | None, list[Any]]:
         if not isinstance(result, dict):
-            return None, "expected a JSON object"
+            return None, "expected a JSON object", []
         drawings = result.get("drawings")
         if not isinstance(drawings, list):
-            return None, "expected top-level drawings to be an array"
+            return None, "expected top-level drawings to be an array", []
         normalized: list[dict[str, Any]] = []
         for index, drawing in enumerate(drawings):
             if not isinstance(drawing, dict):
-                return None, f"drawing entry {index} has unsupported shape: expected an object"
+                return (
+                    None,
+                    f"drawing entry {index} has unsupported shape: expected an object",
+                    [drawing],
+                )
             bbox_key = "bbox_2d" if "bbox_2d" in drawing else "bbox"
             bbox = drawing.get(bbox_key)
-            if not (
-                isinstance(bbox, list)
-                and len(bbox) == 4
-                and all(
-                    isinstance(value, (int, float))
-                    and not isinstance(value, bool)
-                    and 0 <= value <= 1
-                    for value in bbox
-                )
-                and bbox[2] > bbox[0]
-                and bbox[3] > bbox[1]
-            ):
-                return None, (
-                    f"drawing entry {index} has unsupported shape: expected normalized "
-                    "bbox_2d or bbox [x1, y1, x2, y2]"
+            coordinate_space = _drawing_bbox_coordinate_space(bbox, prepared_size)
+            if coordinate_space is None:
+                return (
+                    None,
+                    (
+                        f"drawing entry {index} has invalid bbox: expected normalized or "
+                        "prepared-image pixel bbox_2d or bbox [x1, y1, x2, y2]"
+                    ),
+                    [drawing],
                 )
             description = drawing.get("description")
             if description is not None and not isinstance(description, str):
-                return None, f"drawing entry {index} has unsupported description type"
+                return None, f"drawing entry {index} has unsupported description type", [drawing]
+            bbox_values = tuple(float(value) for value in cast(list[Any], bbox))
             normalized_drawing: dict[str, Any] = {
-                "bbox_2d": [float(value) for value in bbox],
+                "bbox_2d": list(bbox_values),
+                "model_bbox": list(bbox_values),
+                "bbox_coordinate_space": coordinate_space,
             }
             if description is not None:
                 normalized_drawing["description"] = description
             normalized.append(normalized_drawing)
-        return {"drawings": normalized}, None
+        return {"drawings": normalized}, None, []
 
     @classmethod
     def _structured_message(
-        cls, message: dict[str, Any]
-    ) -> tuple[dict[str, Any] | None, bool, str | None]:
+        cls, message: dict[str, Any], prepared_size: tuple[int, int]
+    ) -> tuple[dict[str, Any] | None, bool, str | None, list[Any]]:
         saw_json = False
         unsupported_shape: str | None = None
+        unsupported_entries: list[Any] = []
         for field_name in ("content", "thinking"):
             candidate = message.get(field_name)
             if not isinstance(candidate, str):
@@ -443,11 +475,12 @@ class OllamaDrawingLocalizer:
             except json.JSONDecodeError:
                 continue
             saw_json = True
-            normalized, reason = cls._normalize_result(result)
+            normalized, reason, entries = cls._normalize_result(result, prepared_size)
             if normalized is not None:
-                return normalized, saw_json, None
+                return normalized, saw_json, None, []
             unsupported_shape = reason or "unsupported JSON value"
-        return None, saw_json, unsupported_shape
+            unsupported_entries = entries
+        return None, saw_json, unsupported_shape, unsupported_entries
 
     def localize(self, image: Image.Image) -> tuple[dict[str, Any], float]:
         schema = {
@@ -511,8 +544,8 @@ class OllamaDrawingLocalizer:
                 ),
             }, (time.perf_counter() - started) * 1000
         message = body.get("message", {})
-        result, saw_json, unsupported_shape = self._structured_message(
-            message if isinstance(message, dict) else {}
+        result, saw_json, unsupported_shape, unsupported_entries = self._structured_message(
+            message if isinstance(message, dict) else {}, image.size
         )
         self.response_metadata = {
             "prompt_tokens": body.get("prompt_eval_count"),
@@ -529,6 +562,10 @@ class OllamaDrawingLocalizer:
                     "Qwen returned valid drawing localization JSON but "
                     f"unsupported structure: {unsupported_shape or 'unknown'}"
                 )
+                if unsupported_entries:
+                    structured_error += "; actual unsupported entry JSON: " + json.dumps(
+                        unsupported_entries[0], sort_keys=True
+                    )
             else:
                 structured_error = (
                     "Ollama/Qwen returned no valid drawing localization JSON in content or thinking"
@@ -536,6 +573,7 @@ class OllamaDrawingLocalizer:
             return {
                 "status": "failure",
                 "error": structured_error,
+                "unsupported_entries": unsupported_entries,
                 "raw_response": body,
             }, (time.perf_counter() - started) * 1000
         return result, (time.perf_counter() - started) * 1000
@@ -558,6 +596,26 @@ def pad_normalized_bounds(
         max(0.0, top - vertical_padding),
         min(1.0, right + horizontal_padding),
         min(1.0, bottom + vertical_padding),
+    )
+
+
+def pad_prepared_bounds(
+    bounds: tuple[float, float, float, float],
+    prepared_size: tuple[int, int],
+    proportion: float = 0.05,
+) -> tuple[float, float, float, float]:
+    """Apply the existing proportional padding in prepared-image pixels."""
+    left, top, right, bottom = bounds
+    width = right - left
+    height = bottom - top
+    horizontal_padding = width * proportion
+    vertical_padding = height * proportion
+    prepared_width, prepared_height = prepared_size
+    return (
+        max(0.0, left - horizontal_padding),
+        max(0.0, top - vertical_padding),
+        min(float(prepared_width), right + horizontal_padding),
+        min(float(prepared_height), bottom + vertical_padding),
     )
 
 
@@ -696,7 +754,9 @@ def recover_page(
         "status": "not_run",
         "model": getattr(drawing_localizer, "model", None),
     }
-    drawing_entries: list[tuple[int, tuple[float, float, float, float], str | None, dict[str, Any]]]
+    drawing_entries: list[
+        tuple[int, tuple[float, float, float, float], str, str | None, dict[str, Any]]
+    ]
     if drawing_localizer is not None:
         try:
             localized, drawing_localization_ms = drawing_localizer.localize(prepared.image)
@@ -713,6 +773,7 @@ def recover_page(
                 {
                     "status": "failure",
                     "error": localized.get("error", "drawing localization failed"),
+                    "unsupported_entries": localized.get("unsupported_entries", []),
                 }
             )
             drawing_entries = []
@@ -720,12 +781,21 @@ def recover_page(
             drawing_localization_runtime["status"] = "success"
             drawing_entries = []
             for index, drawing in enumerate(localized.get("drawings", [])):
-                normalized_bbox = cast(
+                model_bbox = cast(
                     tuple[float, float, float, float],
-                    tuple(float(value) for value in drawing["bbox_2d"]),
+                    tuple(
+                        float(value)
+                        for value in drawing.get("model_bbox", drawing["bbox_2d"])
+                    ),
                 )
                 drawing_entries.append(
-                    (index, normalized_bbox, drawing.get("description"), drawing)
+                    (
+                        index,
+                        model_bbox,
+                        str(drawing.get("bbox_coordinate_space", "normalized")),
+                        cast(str | None, drawing.get("description")),
+                        cast(dict[str, Any], drawing),
+                    )
                 )
     else:
         # Compatibility for existing mocked page responses. The production path
@@ -734,6 +804,7 @@ def recover_page(
             (
                 int(raw.get("order", index)),
                 _legacy_drawing_normalized(raw, source.size, prepared.prepared_dimensions),
+                "normalized",
                 raw.get("text"),
                 raw,
             )
@@ -805,15 +876,57 @@ def recover_page(
             )
         )
     crop_started = time.perf_counter()
-    for order, normalized_bounds, description, localization_observation in drawing_entries:
-        padded_normalized = (
-            normalized_bounds
-            if drawing_localization_runtime["status"] == "legacy_page_response"
-            else pad_normalized_bounds(normalized_bounds)
-        )
-        prepared_bounds = _normalized_to_prepared_bounds(
-            padded_normalized, prepared.prepared_dimensions
-        )
+    for (
+        order,
+        model_bbox,
+        coordinate_space,
+        description,
+        localization_observation,
+    ) in drawing_entries:
+        if coordinate_space == "prepared_pixels":
+            padded_prepared = pad_prepared_bounds(model_bbox, prepared.prepared_dimensions)
+            prepared_bounds = RegionBounds(
+                *(round(value) for value in padded_prepared)
+            )
+            normalized_bounds = cast(
+                tuple[float, float, float, float],
+                tuple(
+                    value / dimension
+                    for value, dimension in zip(
+                        model_bbox,
+                        (
+                            prepared.prepared_dimensions[0],
+                            prepared.prepared_dimensions[1],
+                            prepared.prepared_dimensions[0],
+                            prepared.prepared_dimensions[1],
+                        ),
+                        strict=True,
+                    )
+                ),
+            )
+            padded_normalized = tuple(
+                value / dimension
+                for value, dimension in zip(
+                    padded_prepared,
+                    (
+                        prepared.prepared_dimensions[0],
+                        prepared.prepared_dimensions[1],
+                        prepared.prepared_dimensions[0],
+                        prepared.prepared_dimensions[1],
+                    ),
+                    strict=True,
+                )
+            )
+        else:
+            normalized_bounds = model_bbox
+            padded_normalized = (
+                normalized_bounds
+                if drawing_localization_runtime["status"] == "legacy_page_response"
+                else pad_normalized_bounds(normalized_bounds)
+            )
+            prepared_bounds = _normalized_to_prepared_bounds(
+                padded_normalized, prepared.prepared_dimensions
+            )
         bounds = map_prepared_bounds(
             (
                 prepared_bounds.left,
@@ -834,6 +947,8 @@ def recover_page(
             "image": str(image_path),
             "bounds": asdict(bounds),
             "prepared_bounds": asdict(prepared_bounds),
+            "model_bbox": list(model_bbox),
+            "bbox_coordinate_space": coordinate_space,
             "normalized_bounds": normalized_bounds,
             "padded_normalized_bounds": padded_normalized,
             "crop": str(crop_path),
