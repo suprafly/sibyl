@@ -41,29 +41,18 @@ def _projected_page(tmp_path: Path) -> TransformedPage:
         regions=[
             TransformedRegion(
                 order=0,
-                kind="heading",
-                bounds=bounds,
-                prepared_bounds=bounds,
-                qwen_text="Heading",
-                text="Unusual Speling!",
-                source={"image": str(source), "bounds": {"left": 0}, "crop": str(crop)},
-                recognizer={},
-            ),
-            TransformedRegion(
-                order=1,
                 kind="figure",
                 bounds=bounds,
                 prepared_bounds=bounds,
-                qwen_text="diagram",
                 text="",
                 source={"image": str(source), "bounds": {"left": 0}, "crop": str(crop)},
-                recognizer={},
             ),
         ],
         runtime={
-            "benchmark": {"region_count": 2},
-            "disagreements": [{"order": 0, "qwen": "Heading", "trocr": "Unusual Speling!"}],
+            "benchmark": {"region_count": 1},
+            "drawing_localization": {"status": "success"},
         },
+        page_text=["Unusual Speling!"],
     )
 
 
@@ -99,9 +88,7 @@ def test_run_markdown_writes_projection_and_asset_reference(
     transform = tmp_path / "page.sibyl" / "transform.json"
     structured = json.loads(transform.read_text())
     assert structured["interpretation"] == {}
-    assert structured["regions"][0]["qwen_text"] == "Heading"
-    assert structured["regions"][0]["text"] == "Unusual Speling!"
-    assert structured["runtime"]["disagreements"][0]["qwen"] == "Heading"
+    assert structured["page_text"] == ["Unusual Speling!"]
     assert (tmp_path / "page.sibyl" / "assets" / "figure-01.png").exists()
 
 

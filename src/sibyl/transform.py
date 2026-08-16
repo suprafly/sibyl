@@ -16,8 +16,6 @@ from typing import Any, Protocol, cast
 
 from PIL import Image, UnidentifiedImageError
 
-from sibyl.experiments.trocr import Recognizer, TrocrRecognizer
-
 VLM_MAX_DIMENSIONS = (1536, 2048)
 DEFAULT_OLLAMA_URL = "http://127.0.0.1:11434"
 DEFAULT_QWEN_MODEL = "qwen3-vl:8b"
@@ -41,24 +39,14 @@ class PreparedVlmImage:
 
 
 @dataclass(frozen=True)
-class RegionCandidate:
-    value: str
-    evidence: str | None = None
-    status: str = "unresolved"
-
-
-@dataclass(frozen=True)
 class TransformedRegion:
     order: int
     kind: str
     bounds: RegionBounds
     prepared_bounds: RegionBounds | None
-    qwen_text: str | None
     text: str
     normalized_bounds: tuple[float, float, float, float] | None = None
-    candidates: list[RegionCandidate] = field(default_factory=list)
     source: dict[str, Any] = field(default_factory=dict)
-    recognizer: dict[str, Any] = field(default_factory=dict)
 
 
 @dataclass(frozen=True)
@@ -83,17 +71,6 @@ class DrawingLocalizer(Protocol):
     def localize(self, image: Image.Image) -> tuple[dict[str, Any], float]: ...
 
     def release(self) -> None: ...
-
-
-class TextLocalizer(Protocol):
-    model: str
-
-    def localize(self, image: Image.Image) -> tuple[dict[str, Any], float]: ...
-
-    def release(self) -> None: ...
-
-
-TEXT_REGION_PADDING = 0.02
 
 
 def _bounded_dimensions(size: tuple[int, int], maximum: tuple[int, int]) -> tuple[int, int]:
@@ -136,18 +113,6 @@ def _image_data(image: Image.Image) -> str:
     return base64.b64encode(output.getvalue()).decode("ascii")
 
 
-def _valid_text_region_list(regions: Any) -> bool:
-    if not isinstance(regions, list):
-        return False
-    return all(
-        isinstance(region, dict)
-        and set(region) == {"bbox_2d"}
-        and isinstance(region.get("bbox_2d"), list)
-        and _valid_qwen_bbox(region["bbox_2d"])
-        for region in regions
-    )
-
-
 class OllamaPageInterpreter:
     """Qwen3-VL adapter using Ollama's local chat API and JSON schema output."""
 
@@ -161,159 +126,18 @@ class OllamaPageInterpreter:
     def _valid_result(result: Any) -> bool:
         if not isinstance(result, dict):
             return False
-        regions = result.get("regions")
-        figures = result.get("figures")
         interpretation = result.get("page_interpretation")
-        nested_regions = (
-            interpretation.get("text_regions") if isinstance(interpretation, dict) else None
-        )
-        top_level_text_regions = result.get("text_regions")
-        nested_figures = (
-            interpretation.get("diagrams") if isinstance(interpretation, dict) else None
-        )
         page_text = interpretation.get("text") if isinstance(interpretation, dict) else None
-        page_diagrams = interpretation.get("diagram") if isinstance(interpretation, dict) else None
-        page_drawings = interpretation.get("drawing") if isinstance(interpretation, dict) else None
-        if (
-            regions is None
-            and figures is None
-            and nested_regions is None
-            and nested_figures is None
-            and page_text is None
-            and page_diagrams is None
-            and page_drawings is None
-            and top_level_text_regions is None
-        ):
-            return False
-        if regions is not None:
-            if not isinstance(regions, list):
-                return False
-            for region in regions:
-                if not isinstance(region, dict):
-                    return False
-                if "bbox_2d" not in region and not all(
-                    isinstance(region.get(key), (int, float))
-                    for key in ("left", "top", "right", "bottom")
-                ):
-                    return False
-        if figures is not None:
-            if not isinstance(figures, list):
-                return False
-            for figure in figures:
-                if not isinstance(figure, dict):
-                    return False
-                bbox = figure.get("bbox_2d")
-                if not isinstance(figure.get("label"), str) or not (
-                    isinstance(bbox, list)
-                    and len(bbox) == 4
-                    and all(isinstance(value, (int, float)) for value in bbox)
-                ):
-                    return False
-        for nested in (nested_regions, nested_figures):
-            if nested is not None and not (
-                isinstance(nested, list)
-                and all(
-                    isinstance(item, dict)
-                    and isinstance(item.get("bbox_2d"), list)
-                    and len(item["bbox_2d"]) == 4
-                    and all(isinstance(value, (int, float)) for value in item["bbox_2d"])
-                    for item in nested
-                )
-            ):
-                return False
-        if top_level_text_regions is not None and not _valid_text_region_list(
-            top_level_text_regions
-        ):
-            return False
-        if nested_regions is not None and not _valid_text_region_list(nested_regions):
-            return False
-        if page_text is not None and not (
-            isinstance(page_text, list) and all(isinstance(item, str) for item in page_text)
-        ):
-            return False
-        if page_diagrams is not None:
-            valid_diagrams = isinstance(page_diagrams, list) and all(
-                isinstance(item, dict)
-                and isinstance(item.get("bbox"), list)
-                and len(item["bbox"]) == 4
-                and all(isinstance(value, (int, float)) for value in item["bbox"])
-                and isinstance(item.get("description"), str)
-                for item in page_diagrams
-            )
-            if not valid_diagrams:
-                return False
-        if page_drawings is not None:
-            valid_drawings = isinstance(page_drawings, list) and all(
-                isinstance(item, dict)
-                and isinstance(item.get("bbox"), list)
-                and len(item["bbox"]) == 4
-                and all(isinstance(value, (int, float)) for value in item["bbox"])
-                and isinstance(item.get("description"), str)
-                for item in page_drawings
-            )
-            if not valid_drawings:
-                return False
-        return True
+        return isinstance(page_text, list) and all(isinstance(item, str) for item in page_text)
 
     @staticmethod
     def _normalize_result(result: dict[str, Any], prepared_size: tuple[int, int]) -> dict[str, Any]:
-        if "regions" in result:
-            return result
-        if "figures" in result:
-            result["regions"] = [
-                {
-                    "order": index,
-                    "kind": "figure",
-                    "text": figure["label"],
-                    "bbox_2d": figure["bbox_2d"],
-                }
-                for index, figure in enumerate(result["figures"])
-            ]
-            return result
         interpretation = result.get("page_interpretation", {})
         if not isinstance(interpretation, dict):
             return result
         page_text = interpretation.get("text", [])
-        page_drawings = interpretation.get("drawing")
-        if page_drawings is None:
-            page_drawings = interpretation.get("diagram", [])
-        prepared_width, prepared_height = prepared_size
-        text_regions = cast(
-            list[dict[str, Any]], result.get("text_regions", interpretation.get("text_regions", []))
-        )
-        diagrams = cast(list[dict[str, Any]], interpretation.get("diagrams", []))
-        result["regions"] = [
-            {
-                "order": region.get("order", index),
-                "kind": "text",
-                "text": region.get("text"),
-                "bbox_2d": region["bbox_2d"],
-            }
-            for index, region in enumerate(text_regions)
-        ] + [
-            {
-                "order": len(text_regions) + index,
-                "kind": "figure",
-                "text": diagram.get("description"),
-                "bbox_2d": diagram["bbox_2d"],
-            }
-            for index, diagram in enumerate(diagrams)
-        ]
-        result["regions"] += [
-            {
-                "order": len(result["regions"]) + index,
-                "kind": "figure",
-                "text": diagram.get("description"),
-                "bbox_2d": [
-                    round(diagram["bbox"][0] * prepared_width),
-                    round(diagram["bbox"][1] * prepared_height),
-                    round(diagram["bbox"][2] * prepared_width),
-                    round(diagram["bbox"][3] * prepared_height),
-                ],
-            }
-            for index, diagram in enumerate(page_drawings or [])
-        ]
         result["page_text"] = page_text
+        result["regions"] = []
         return result
 
     @classmethod
@@ -346,7 +170,6 @@ class OllamaPageInterpreter:
                     "type": "object",
                     "properties": {
                         "text": {"type": "array", "items": {"type": "string"}},
-                        "drawings": {"type": "array"},
                     },
                     "required": ["text"],
                 },
@@ -354,22 +177,14 @@ class OllamaPageInterpreter:
             "required": ["page_interpretation"],
         }
         prompt = (
-            "Transcribe the ordinary handwritten notes visible on this page. Return only JSON "
-            "matching the schema. "
-            "Transcribe the ordinary handwritten notes and textual marks visible on the page "
-            "in reading "
-            "order. Read the actual handwriting and preserve the wording, spelling, "
-            "capitalization, punctuation, shorthand, symbols that are genuinely part "
-            "of written text, and unfamiliar terminology. Do not autocorrect, replace "
-            "a word with a semantically more likely word, normalize unfamiliar words, "
-            "or invent text. Use [unclear] only when the letterforms are genuinely "
-            "unreadable. Do not transcribe graphical elements of drawings or diagrams "
-            "as page text, including arrows, diagram strokes, lines, and graphical "
-            "connectors that clearly function as graphics. A handwritten word remains "
-            "text even when it is physically near a drawing; do not exclude text merely "
-            "because it is beside, above, below, or adjacent to a figure. Do not "
-            "treat arrows, diagram strokes, connectors, grafting cuts, or isolated "
-            "drawing symbols as text."
+            "Transcribe the handwritten textual notes on this page in reading order. "
+            "Read the actual handwriting rather than semantically correcting it. "
+            "Preserve wording, spelling, capitalization, punctuation, shorthand, and "
+            "unfamiliar terminology. Do not invent text. Use [unclear] only where the "
+            "handwriting is genuinely unreadable. Do not transcribe graphical elements "
+            "of diagrams as page text, including graphical arrows, diagram strokes, "
+            "connectors, and other purely graphical marks. Handwritten words remain text "
+            "even when they are near a drawing. Return only the requested structured JSON."
         )
         payload = {
             "model": self.model,
@@ -423,127 +238,6 @@ class OllamaPageInterpreter:
 
     def release(self) -> None:
         # keep_alive=0 on the interpretation request asks Ollama to release the model.
-        return None
-
-
-class OllamaTextLocalizer:
-    """Dedicated bbox-only Qwen3-VL boundary for handwritten text regions."""
-
-    def __init__(self, model: str | None = None, base_url: str | None = None) -> None:
-        self.model = model or os.environ.get("SIBYL_QWEN_MODEL", DEFAULT_QWEN_MODEL)
-        configured_url = base_url or os.environ.get("SIBYL_OLLAMA_URL", DEFAULT_OLLAMA_URL)
-        self.base_url = configured_url.rstrip("/")
-        self.response_metadata: dict[str, Any] = {}
-
-    @staticmethod
-    def _valid_result(result: Any) -> bool:
-        return isinstance(result, dict) and _valid_text_region_list(result.get("text_regions"))
-
-    @classmethod
-    def _structured_message(
-        cls, message: dict[str, Any]
-    ) -> tuple[dict[str, Any] | None, bool, str | None]:
-        saw_json = False
-        unsupported_shape: str | None = None
-        for field_name in ("content", "thinking"):
-            candidate = message.get(field_name)
-            if not isinstance(candidate, str):
-                continue
-            try:
-                result = json.loads(candidate)
-            except json.JSONDecodeError:
-                continue
-            saw_json = True
-            if cls._valid_result(result):
-                return cast(dict[str, Any], result), saw_json, None
-            if isinstance(result, dict):
-                unsupported_shape = ", ".join(sorted(result)) or "object"
-        return None, saw_json, unsupported_shape
-
-    def localize(self, image: Image.Image) -> tuple[dict[str, Any], float]:
-        schema = {
-            "type": "object",
-            "properties": {
-                "text_regions": {
-                    "type": "array",
-                    "items": {
-                        "type": "object",
-                        "properties": {
-                            "bbox_2d": {
-                                "type": "array",
-                                "items": {"type": "number", "minimum": 0, "maximum": 1000},
-                                "minItems": 4,
-                                "maxItems": 4,
-                            }
-                        },
-                        "required": ["bbox_2d"],
-                        "additionalProperties": False,
-                    },
-                }
-            },
-            "required": ["text_regions"],
-            "additionalProperties": False,
-        }
-        prompt = (
-            "Identify every distinct region of handwritten textual notes on this page.\n\n"
-            "Return one bounding box for each coherent text block.\n\n"
-            "Do not include arrows, diagram strokes, drawing lines, graphical connectors,\n"
-            "or other purely graphical elements.\n\n"
-            "Handwritten words remain text even when they are near a drawing.\n\n"
-            "Return only the requested JSON."
-        )
-        payload = {
-            "model": self.model,
-            "stream": False,
-            "think": False,
-            "format": schema,
-            "keep_alive": 0,
-            "messages": [{"role": "user", "content": prompt, "images": [_image_data(image)]}],
-        }
-        started = time.perf_counter()
-        request = urllib.request.Request(
-            f"{self.base_url}/api/chat",
-            data=json.dumps(payload).encode(),
-            headers={"Content-Type": "application/json"},
-            method="POST",
-        )
-        try:
-            with urllib.request.urlopen(request, timeout=300) as response:
-                body = json.load(response)
-        except (urllib.error.URLError, TimeoutError, json.JSONDecodeError) as error:
-            self.response_metadata = {"response_fields": []}
-            return {
-                "status": "failure",
-                "error": f"Unable to query Ollama/Qwen text localization ({self.model}): {error}",
-            }, (time.perf_counter() - started) * 1000
-        message = body.get("message", {})
-        result, saw_json, unsupported_shape = self._structured_message(
-            message if isinstance(message, dict) else {}
-        )
-        self.response_metadata = {
-            "prompt_tokens": body.get("prompt_eval_count"),
-            "output_tokens": body.get("eval_count"),
-            "response_fields": [
-                field_name
-                for field_name in ("content", "thinking")
-                if isinstance(message, dict) and isinstance(message.get(field_name), str)
-            ],
-        }
-        if result is None:
-            structured_error = (
-                "Qwen returned valid JSON but unsupported text localization schema: "
-                f"{unsupported_shape or 'unknown'}"
-                if saw_json
-                else "Ollama/Qwen returned no valid text localization JSON in content or thinking"
-            )
-            return {"status": "failure", "error": structured_error, "raw_response": body}, (
-                time.perf_counter() - started
-            ) * 1000
-        return {"text_regions": result["text_regions"], "raw_response": body}, (
-            time.perf_counter() - started
-        ) * 1000
-
-    def release(self) -> None:
         return None
 
 
@@ -791,69 +485,6 @@ def map_prepared_bounds(
     return RegionBounds(left, top, right, bottom)
 
 
-def _bounds(
-    item: dict[str, Any],
-    source_size: tuple[int, int],
-    prepared_size: tuple[int, int],
-) -> tuple[RegionBounds, RegionBounds | None]:
-    width, height = source_size
-    bbox = item.get("bbox_2d")
-    if isinstance(bbox, list) and len(bbox) == 4:
-        prepared_bounds = (
-            float(bbox[0]),
-            float(bbox[1]),
-            float(bbox[2]),
-            float(bbox[3]),
-        )
-        return map_prepared_bounds(prepared_bounds, prepared_size, source_size), RegionBounds(
-            *(round(value) for value in prepared_bounds)
-        )
-    values = [float(item.get(key, 0)) for key in ("left", "top", "right", "bottom")]
-    normalized = RegionBounds(
-        *(
-            round(value * dimension)
-            for value, dimension in zip(values, (width, height, width, height), strict=True)
-        )
-    )
-    return map_prepared_bounds(
-        (
-            normalized.left * prepared_size[0] / width,
-            normalized.top * prepared_size[1] / height,
-            normalized.right * prepared_size[0] / width,
-            normalized.bottom * prepared_size[1] / height,
-        ),
-        prepared_size,
-        source_size,
-    ), None
-
-
-def _text_region_bounds(
-    item: dict[str, Any], source_size: tuple[int, int], prepared_size: tuple[int, int]
-) -> tuple[RegionBounds, RegionBounds, tuple[float, float, float, float]]:
-    """Map a text region from Qwen's 0..1000 space to an original crop."""
-    bbox = item.get("bbox_2d")
-    if not _valid_qwen_bbox(bbox):
-        raise ValueError("spatial text region has an invalid Qwen 0-1000 bbox")
-    qwen_values = cast(list[float], bbox)
-    qwen_bbox = cast(
-        tuple[float, float, float, float], tuple(float(value) for value in qwen_values)
-    )
-    normalized = qwen_bbox_to_normalized(qwen_bbox)
-    padded = pad_normalized_bounds(normalized, TEXT_REGION_PADDING)
-    prepared_bounds = _normalized_to_prepared_bounds(padded, prepared_size)
-    source_bounds = map_prepared_bounds(
-        (
-            prepared_bounds.left,
-            prepared_bounds.top,
-            prepared_bounds.right,
-            prepared_bounds.bottom,
-        ),
-        prepared_size,
-        source_size,
-    )
-    return source_bounds, prepared_bounds, normalized
-
-
 def _normalized_to_prepared_bounds(
     bounds: tuple[float, float, float, float], prepared_size: tuple[int, int]
 ) -> RegionBounds:
@@ -872,34 +503,11 @@ def _normalized_to_prepared_bounds(
     )
 
 
-def _legacy_drawing_normalized(
-    raw: dict[str, Any], source_size: tuple[int, int], prepared_size: tuple[int, int]
-) -> tuple[float, float, float, float]:
-    _, prepared_bounds = _bounds(raw, source_size, prepared_size)
-    if prepared_bounds is None:
-        source_bounds, _ = _bounds(raw, source_size, prepared_size)
-        return (
-            source_bounds.left / source_size[0],
-            source_bounds.top / source_size[1],
-            source_bounds.right / source_size[0],
-            source_bounds.bottom / source_size[1],
-        )
-    return (
-        prepared_bounds.left / prepared_size[0],
-        prepared_bounds.top / prepared_size[1],
-        prepared_bounds.right / prepared_size[0],
-        prepared_bounds.bottom / prepared_size[1],
-    )
-
-
 def transform_page(
     image_path: Path,
     interpreter: PageInterpreter | None = None,
-    recognizer: Recognizer | None = None,
     *,
-    recognizer_metadata: dict[str, Any] | None = None,
     drawing_localizer: DrawingLocalizer | None = None,
-    text_localizer: TextLocalizer | None = None,
 ) -> TransformedPage:
     """Transform page text, then independently localize and crop its drawings."""
     transform_started = time.perf_counter()
@@ -919,47 +527,6 @@ def transform_page(
     if interpretation.get("status") == "failure":
         failure_error = interpretation.get("error", "Qwen interpretation failed")
         raise RuntimeError(f"{failure_error}: {json.dumps(interpretation.get('raw_response'))}")
-    raw_regions = interpretation.get("regions", [])
-    text_localization_ms = 0.0
-    text_localization_runtime: dict[str, Any] = {
-        "status": "legacy_page_response" if supplied_interpreter else "not_run",
-        "model": getattr(text_localizer, "model", None),
-    }
-    localized_text_response: dict[str, Any] | None = None
-    if text_localizer is None and not supplied_interpreter:
-        text_localizer = OllamaTextLocalizer()
-    if text_localizer is not None:
-        try:
-            localized_text_response, text_localization_ms = text_localizer.localize(prepared.image)
-            text_localizer.release()
-        except (RuntimeError, ValueError) as error:
-            localized_text_response = {"status": "failure", "error": str(error)}
-        if localized_text_response.get("status") == "failure":
-            text_localization_runtime.update(
-                {"status": "failure", "error": localized_text_response.get("error")}
-            )
-            spatial_text_raw: list[dict[str, Any]] = []
-        else:
-            text_localization_runtime["status"] = "success"
-            spatial_text_raw = [
-                {**region, "kind": "text"}
-                for region in localized_text_response.get("text_regions", [])
-            ]
-    else:
-        spatial_text_raw = [
-            raw for raw in raw_regions if str(raw.get("kind", "text")) != "figure"
-        ]
-    spatial_text_raw = sorted(
-        spatial_text_raw,
-        key=lambda item: (
-            float(item.get("bbox_2d", [0, 0, 0, 0])[1]),
-            float(item.get("bbox_2d", [0, 0, 0, 0])[0]),
-        ),
-    )
-    spatial_text_raw = [
-        {**raw, "order": index + 1}
-        for index, raw in enumerate(spatial_text_raw)
-    ]
     if drawing_localizer is None and not supplied_interpreter:
         drawing_localizer = OllamaDrawingLocalizer()
 
@@ -1012,162 +579,23 @@ def transform_page(
                     )
                 )
     else:
-        # Compatibility for existing mocked page responses. The production path
-        # always uses the dedicated localizer above.
-        drawing_entries = [
-            (
-                int(raw.get("order", index)),
-                _legacy_drawing_normalized(raw, source.size, prepared.prepared_dimensions),
-                "normalized",
-                raw.get("text"),
-                raw,
-            )
-            for index, raw in enumerate(raw_regions)
-            if str(raw.get("kind", "text")) == "figure"
-        ]
-        if drawing_entries:
-            drawing_localization_runtime["status"] = "legacy_page_response"
-    if spatial_text_raw and recognizer is None:
-        recognizer, load_ms, cuda, device, gpu = TrocrRecognizer.from_local_cache()
-        recognizer_metadata = {
-            "model_load_ms": load_ms,
-            "cuda_available": cuda,
-            "device": device,
-            "gpu": gpu,
-        }
-    elif not spatial_text_raw:
-        recognizer_metadata = recognizer_metadata or {
-            "status": "not_applicable",
-            "reason": "no spatial text regions",
-        }
-    else:
-        recognizer_metadata = recognizer_metadata or {}
+        drawing_entries = []
     regions: list[TransformedRegion] = []
     artifact_directory = image_path.parent / f"{image_path.stem}.sibyl" / "assets"
+    if artifact_directory.is_dir():
+        stale_assets = [
+            *artifact_directory.glob("text-*.png"),
+            *artifact_directory.glob("figure-*.png"),
+        ]
+        for stale_asset in stale_assets:
+            stale_asset.unlink()
     figure_count = 0
-    disagreements: list[dict[str, Any]] = []
-    trocr_timings: list[dict[str, Any]] = []
-    trocr_successes = 0
-    trocr_failures = 0
     crop_started = time.perf_counter()
-    for text_index, raw in enumerate(spatial_text_raw, start=1):
-        if isinstance(raw.get("bbox_2d"), list):
-            bounds, prepared_bounds, normalized_bounds = _text_region_bounds(
-                raw, source.size, prepared.prepared_dimensions
-            )
-        else:
-            # Compatibility for older mocked page responses using normalized edge keys.
-            bounds, legacy_prepared_bounds = _bounds(
-                raw, source.size, prepared.prepared_dimensions
-            )
-            normalized_bounds = (
-                bounds.left / source.width,
-                bounds.top / source.height,
-                bounds.right / source.width,
-                bounds.bottom / source.height,
-            )
-            prepared_bounds = legacy_prepared_bounds or _normalized_to_prepared_bounds(
-                normalized_bounds, prepared.prepared_dimensions
-            )
-        region_image = source.crop((bounds.left, bounds.top, bounds.right, bounds.bottom)).convert(
-            "RGB"
-        )
-        artifact_directory.mkdir(parents=True, exist_ok=True)
-        text_asset_name = f"text-{text_index:02d}.png"
-        text_asset_path = artifact_directory / text_asset_name
-        region_image.save(text_asset_path, format="PNG")
-        kind = str(raw.get("kind", "text"))
-        if recognizer is None:
-            raise RuntimeError("TrOCR recognizer is unavailable for a spatial text region")
-        started = time.perf_counter()
-        order = int(raw.get("order", len(regions)))
-        try:
-            text, inference_ms = recognizer.recognize(region_image)
-            elapsed_ms = (time.perf_counter() - started) * 1000
-            recognizer_observation = {
-                "status": "success",
-                "text": text,
-                "inference_ms": round(inference_ms, 3),
-                "elapsed_ms": round(elapsed_ms, 3),
-            }
-            trocr_successes += 1
-            trocr_timings.append({"order": order, "inference_ms": round(inference_ms, 3)})
-        except Exception as error:  # A bad crop must not discard the page transform.
-            elapsed_ms = (time.perf_counter() - started) * 1000
-            text = ""
-            inference_ms = 0.0
-            trocr_failures += 1
-            recognizer_observation = {
-                "status": "failure",
-                "error": str(error),
-                "inference_ms": None,
-                "elapsed_ms": round(elapsed_ms, 3),
-            }
-            trocr_timings.append(
-                {"order": order, "status": "failure", "elapsed_ms": round(elapsed_ms, 3)}
-            )
-        if raw.get("text") is not None and raw.get("text") != text:
-            disagreements.append(
-                {
-                    "order": order,
-                    "qwen": raw.get("text"),
-                    "trocr": text,
-                    "status": recognizer_observation["status"],
-                }
-            )
-        source_metadata: dict[str, Any] = {
-            "image": str(image_path),
-            "bounds": asdict(bounds),
-            "prepared_bounds": asdict(prepared_bounds) if prepared_bounds else None,
-            "model_bbox": raw.get("bbox_2d"),
-            "bbox_coordinate_space": "qwen_0_1000" if raw.get("bbox_2d") else "legacy_normalized",
-            "normalized_bounds": normalized_bounds,
-            "text_crop": f"assets/{text_asset_name}",
-            "crop": {
-                "source_bounds": [bounds.left, bounds.top, bounds.right, bounds.bottom],
-                "prepared_bounds": (
-                    [
-                        prepared_bounds.left,
-                        prepared_bounds.top,
-                        prepared_bounds.right,
-                        prepared_bounds.bottom,
-                    ]
-                    if prepared_bounds
-                    else None
-                ),
-                "width": region_image.width,
-                "height": region_image.height,
-                "representation": "RGB source crop passed to TrOCR",
-            },
-            "padding": {
-                "normalized_proportion": TEXT_REGION_PADDING
-                if raw.get("bbox_2d")
-                else 0.0,
-                "normalized_bounds": pad_normalized_bounds(
-                    normalized_bounds,
-                    TEXT_REGION_PADDING if raw.get("bbox_2d") else 0.0,
-                ),
-            },
-            "provenance": ["page_text_localization", "trocr"],
-        }
-        regions.append(
-            TransformedRegion(
-                order=order,
-                kind=kind,
-                bounds=bounds,
-                prepared_bounds=prepared_bounds,
-                qwen_text=raw.get("text"),
-                text=text,
-                normalized_bounds=normalized_bounds,
-                source=source_metadata,
-                recognizer=recognizer_observation,
-            )
-        )
     for (
         order,
         model_bbox,
         coordinate_space,
-        description,
+        _description,
         localization_observation,
     ) in drawing_entries:
         if coordinate_space == "qwen_0_1000":
@@ -1219,32 +647,17 @@ def transform_page(
                 kind="figure",
                 bounds=bounds,
                 prepared_bounds=prepared_bounds,
-                qwen_text=description,
                 text="",
                 normalized_bounds=normalized_bounds,
                 source=source_metadata,
-                recognizer={"status": "not_applicable"},
             )
         )
-    crop_ms = (
-        (time.perf_counter() - crop_started) * 1000
-        if (figure_count or spatial_text_raw)
-        else 0.0
-    )
+    crop_ms = (time.perf_counter() - crop_started) * 1000 if figure_count else 0.0
     response_metadata = getattr(interpreter, "response_metadata", {})
     total_ms = (time.perf_counter() - transform_started) * 1000
     drawing_count = sum(region.kind == "figure" for region in regions)
-    spatial_text_count = len(regions) - drawing_count
-    page_text = (
-        [
-            region.text
-            for region in sorted(regions, key=lambda item: item.order)
-            if region.kind != "figure"
-        ]
-        if spatial_text_raw
-        else interpretation.get(
-            "page_text", interpretation.get("page_interpretation", {}).get("text", [])
-        )
+    page_text = interpretation.get(
+        "page_text", interpretation.get("page_interpretation", {}).get("text", [])
     )
     runtime = {
         "vlm_model": getattr(interpreter, "model", None),
@@ -1259,23 +672,11 @@ def transform_page(
             "timing_ms": round(page_transform_ms, 3),
             "response_metadata": response_metadata,
         },
-        "text_localization": {
-            **text_localization_runtime,
-            "timing_ms": round(text_localization_ms, 3),
-            "response_metadata": getattr(text_localizer, "response_metadata", {}),
-            "raw_response": (
-                localized_text_response.get("raw_response")
-                if localized_text_response is not None
-                else None
-            ),
-            "regions": spatial_text_count,
-        },
         "drawing_localization": {
             **drawing_localization_runtime,
             "timing_ms": round(drawing_localization_ms, 3),
             "response_metadata": getattr(drawing_localizer, "response_metadata", {}),
         },
-        "recognizer": recognizer_metadata,
         "benchmark": {
             "model": getattr(interpreter, "model", None),
             "page_transform_model": getattr(interpreter, "model", None),
@@ -1291,24 +692,13 @@ def transform_page(
             "qwen_ms": round(page_transform_ms, 3),
             "page_transform_ms": round(page_transform_ms, 3),
             "drawing_localization_ms": round(drawing_localization_ms, 3),
-            "text_localization_ms": round(text_localization_ms, 3),
             "crop_ms": round(crop_ms, 3),
             "prompt_tokens": response_metadata.get("prompt_tokens"),
             "output_tokens": response_metadata.get("output_tokens"),
             "region_count": len(regions),
-            "spatial_text_regions": spatial_text_count,
             "drawing_regions": drawing_count,
-            "trocr_attempts": len(trocr_timings),
-            "trocr_successes": trocr_successes,
-            "trocr_failures": trocr_failures,
-            "trocr_ms": round(
-                sum(float(timing.get("inference_ms") or 0) for timing in trocr_timings), 3
-            ),
-            "trocr_timings": trocr_timings,
             "total_transform_ms": round(total_ms, 3),
         },
-        "disagreements": disagreements,
-        "canonical_text_source": "trocr_spatial_regions" if spatial_text_raw else "qwen_page_text",
         "qwen_page_text": interpretation.get(
             "page_text", interpretation.get("page_interpretation", {}).get("text", [])
         ),
@@ -1339,16 +729,7 @@ def write_transform_json(page: TransformedPage) -> Path:
 
 def format_text_transform(page: TransformedPage) -> str:
     """Project only transformed text, preserving model spelling and order."""
-    lines: list[str] = list(page.page_text)
-    assembled_spatial_text = page.runtime.get("canonical_text_source") == "trocr_spatial_regions"
-    for region in sorted(page.regions, key=lambda item: item.order):
-        if region.kind == "figure" or not region.text or assembled_spatial_text:
-            continue
-        if region.kind in {"bullet", "list_item"}:
-            lines.append(f"- {region.text}")
-        else:
-            lines.append(region.text)
-    return "\n\n".join(lines)
+    return "\n\n".join(page.page_text)
 
 
 def write_markdown_transform(page: TransformedPage) -> Path:
@@ -1359,7 +740,6 @@ def write_markdown_transform(page: TransformedPage) -> Path:
     output_directory.mkdir(parents=True, exist_ok=True)
     write_transform_json(page)
     markdown_lines: list[str] = list(page.page_text)
-    assembled_spatial_text = page.runtime.get("canonical_text_source") == "trocr_spatial_regions"
     figure_count = 0
     for region in sorted(page.regions, key=lambda item: item.order):
         if region.kind == "figure":
@@ -1375,14 +755,6 @@ def write_markdown_transform(page: TransformedPage) -> Path:
             label = f"Figure {figure_count}"
             markdown_lines.append(f"![{label}](assets/{target.name})")
             continue
-        if not region.text or assembled_spatial_text:
-            continue
-        if region.kind == "heading":
-            markdown_lines.append(f"# {region.text}")
-        elif region.kind in {"bullet", "list_item"}:
-            markdown_lines.append(f"- {region.text}")
-        else:
-            markdown_lines.append(region.text)
     output_path = output_directory / "transform.md"
     output_path.write_text("\n\n".join(markdown_lines) + "\n", encoding="utf-8")
     return output_path
