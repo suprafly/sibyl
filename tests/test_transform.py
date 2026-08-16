@@ -96,6 +96,18 @@ def test_page_focus_defaults_to_full_and_content_is_opt_in(
     assert focused_dimensions[0] / focused_dimensions[1] == pytest.approx(0.75)
 
 
+def test_supplied_specimen_content_focus_uses_full_page_envelope(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    source_path = Path("samples/Grafting-101-page-004.png")
+    monkeypatch.setenv("SIBYL_PAGE_FOCUS", "content")
+    with Image.open(source_path) as opened:
+        _, dimensions = prepare_page_image(opened.convert("RGB"))
+    assert dimensions == (1536, 2012)
+    assert dimensions[0] <= 1536
+    assert dimensions[1] <= 2048
+
+
 def test_content_focus_stays_one_page_and_preserves_drawing_preparation(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
@@ -110,7 +122,7 @@ def test_content_focus_stays_one_page_and_preserves_drawing_preparation(
     assert page.runtime["benchmark"]["page_focus"] == "content"
     page_dimensions = page.runtime["benchmark"]["page_preparation_dimensions"]
     assert page_dimensions["width"] <= 1536
-    assert page_dimensions["height"] <= 1536
+    assert page_dimensions["height"] <= 2048
     assert page.runtime["benchmark"]["drawing_preparation_dimensions"] == {
         "width": 1536,
         "height": 2048,

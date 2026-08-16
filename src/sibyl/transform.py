@@ -18,7 +18,7 @@ from typing import Any, Protocol, cast
 from PIL import Image, ImageChops, UnidentifiedImageError
 
 DRAWING_MAX_DIMENSIONS = (1536, 2048)
-CONTENT_PAGE_MAX_DIMENSIONS = (1536, 1536)
+CONTENT_PAGE_MAX_DIMENSIONS = (1536, 2048)
 DEFAULT_PAGE_MAX_DIMENSION = 1536
 DEFAULT_PAGE_FOCUS = "full"
 CONTENT_PAGE_FOCUS = "content"
