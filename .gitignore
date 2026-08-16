@@ -10,3 +10,4 @@ build/
 
 # Local experiment samples and generated artifacts
 samples/
+.sibyl/experiments/
