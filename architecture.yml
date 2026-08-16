@@ -1,0 +1,27 @@
+version: 1
+
+roots:
+  - path: src
+    extensions:
+      - ".py"
+    areas:
+      - sibyl
+    allow_loose_files: true
+
+language_extensions:
+  ".py": python
+
+file_rules:
+  - id: SIBYL-LANG-001
+    title: Sibyl application source is implemented in Python
+    kind: language
+    severity: error
+    mode: enforcing
+    selector: {}
+    permitted_languages: [python]
+
+structure:
+  undeclared_root_folders:
+    severity: error
+
+dependency_rules: []
