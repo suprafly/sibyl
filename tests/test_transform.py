@@ -161,11 +161,11 @@ def test_qwen_prompt_requests_page_text_and_drawings_not_spatial_text(monkeypatc
     OllamaPageInterpreter(model="test").interpret(Image.new("L", (20, 20)))
     request = requests[0]
     assert "regions" not in request["format"]["properties"]
-    assert "page-level text" in request["messages"][0]["content"]
+    assert "handwritten notes" in request["messages"][0]["content"]
     assert "spatial text regions" in request["messages"][0]["content"]
 
 
-def test_qwen_page_prompt_separates_figures_and_requires_faithful_transcription(
+def test_qwen_page_prompt_preserves_text_near_figures_and_excludes_graphics(
     monkeypatch: Any,
 ) -> None:
     requests: list[dict[str, Any]] = []
@@ -179,7 +179,9 @@ def test_qwen_page_prompt_separates_figures_and_requires_faithful_transcription(
                         "page_interpretation": {
                             "text": [
                                 "Xylem",
-                                "Scion",
+                                "- transports mineral nutrients and water from root to Scion",
+                                "Phloem",
+                                "- transports food and nutrients from leaves to storage organs.",
                                 "Splice grafting - what we will do now.",
                             ]
                         }
@@ -193,22 +195,26 @@ def test_qwen_page_prompt_separates_figures_and_requires_faithful_transcription(
     prompt = requests[0]["messages"][0]["content"]
     for instruction in (
         "ordinary handwritten notes",
-        "diagram arrows",
-        "diagram-only marks",
-        "annotations visually attached to a figure",
-        "without duplication in page_text",
-        "preserve wording, spelling",
-        "unfamiliar technical words",
-        "Do not normalize terminology",
+        "preserve the wording, spelling",
+        "unfamiliar terminology",
         "autocorrect",
-        "semantically correct",
-        "based on context",
+        "semantically more likely word",
         "[unclear]",
+        "graphical elements of drawings or diagrams",
+        "arrows, diagram strokes, lines",
+        "graphical connectors",
+        "handwritten word remains text",
+        "physically near a drawing",
+        "beside, above, below, or adjacent",
     ):
         assert instruction in prompt
+    assert "Splice" not in prompt
+    assert "Scion" not in prompt
     assert result["page_text"] == [
         "Xylem",
-        "Scion",
+        "- transports mineral nutrients and water from root to Scion",
+        "Phloem",
+        "- transports food and nutrients from leaves to storage organs.",
         "Splice grafting - what we will do now.",
     ]
     assert "↓" not in result["page_text"]
