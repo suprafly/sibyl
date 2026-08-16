@@ -88,7 +88,7 @@ def test_recover_markdown_writes_projection_and_asset_reference(
     output = capsys.readouterr().out
     markdown = tmp_path / "page.sibyl" / "recovery.md"
     assert str(markdown.parent) in output
-    assert "![diagram](assets/figure-01.png)" in markdown.read_text()
+    assert "![Figure 1](assets/figure-01.png)" in markdown.read_text()
     recovery = tmp_path / "page.sibyl" / "recovery.json"
     structured = json.loads(recovery.read_text())
     assert structured["interpretation"] == {}

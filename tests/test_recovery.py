@@ -3,13 +3,16 @@ from io import BytesIO
 from pathlib import Path
 from typing import Any
 
+import pytest
 from PIL import Image
 
 from sibyl.recovery import (
+    OllamaDrawingLocalizer,
     OllamaPageInterpreter,
     RegionBounds,
     format_recovery,
     map_prepared_bounds,
+    pad_normalized_bounds,
     prepare_vlm_image,
     recover_page,
     write_markdown_recovery,
@@ -97,9 +100,7 @@ def test_qwen_structured_json_is_accepted_from_thinking(monkeypatch: Any) -> Non
     payload = {"figures": [{"label": "diagram", "bbox_2d": [1, 2, 10, 20]}]}
     monkeypatch.setattr(
         "urllib.request.urlopen",
-        lambda request, timeout: _ollama_response(
-            {"content": "", "thinking": json.dumps(payload)}
-        ),
+        lambda request, timeout: _ollama_response({"content": "", "thinking": json.dumps(payload)}),
     )
     result, _ = OllamaPageInterpreter(model="test").interpret(Image.new("L", (20, 20)))
     assert result["figures"] == payload["figures"]
@@ -133,9 +134,7 @@ def test_qwen_page_interpretation_shape_from_thinking_is_normalized(monkeypatch:
     }
     monkeypatch.setattr(
         "urllib.request.urlopen",
-        lambda request, timeout: _ollama_response(
-            {"content": "", "thinking": json.dumps(payload)}
-        ),
+        lambda request, timeout: _ollama_response({"content": "", "thinking": json.dumps(payload)}),
     )
     result, _ = OllamaPageInterpreter(model="test").interpret(Image.new("L", (1536, 2048)))
     assert result["page_text"] == expected_text
@@ -143,9 +142,9 @@ def test_qwen_page_interpretation_shape_from_thinking_is_normalized(monkeypatch:
     assert result["regions"][0]["kind"] == "figure"
     assert result["regions"][0]["bbox_2d"] == [505, 1468, 656, 1790]
     assert result["regions"][0]["text"] == expected_description
-    assert map_prepared_bounds(
-        (505, 1468, 656, 1790), (1536, 2048), (3900, 5200)
-    ) == RegionBounds(1282, 3727, 1666, 4545)
+    assert map_prepared_bounds((505, 1468, 656, 1790), (1536, 2048), (3900, 5200)) == RegionBounds(
+        1282, 3727, 1666, 4545
+    )
 
 
 def test_qwen_prompt_requests_page_text_and_drawings_not_spatial_text(monkeypatch: Any) -> None:
@@ -154,11 +153,7 @@ def test_qwen_prompt_requests_page_text_and_drawings_not_spatial_text(monkeypatc
     def urlopen(request: Any, timeout: int) -> _Response:
         requests.append(json.loads(request.data))
         return _ollama_response(
-            {
-                "content": json.dumps(
-                    {"page_interpretation": {"text": [], "drawing": []}}
-                )
-            }
+            {"content": json.dumps({"page_interpretation": {"text": [], "drawing": []}})}
         )
 
     monkeypatch.setattr("urllib.request.urlopen", urlopen)
@@ -190,6 +185,40 @@ def test_qwen_valid_but_unsupported_json_is_distinguished(monkeypatch: Any) -> N
     assert result["status"] == "failure"
     assert "valid JSON but unsupported recovery schema" in result["error"]
     assert "page_interpretation" in result["error"]
+
+
+def test_drawing_localizer_accepts_content_json_and_uses_dedicated_schema(
+    monkeypatch: Any,
+) -> None:
+    requests: list[dict[str, Any]] = []
+    payload = {"drawings": [{"bbox_2d": [0.1, 0.2, 0.8, 0.9], "description": "complete figure"}]}
+
+    def urlopen(request: Any, timeout: int) -> _Response:
+        requests.append(json.loads(request.data))
+        return _ollama_response({"content": json.dumps(payload)})
+
+    monkeypatch.setattr("urllib.request.urlopen", urlopen)
+    localizer = OllamaDrawingLocalizer(model="test")
+    result, _ = localizer.localize(Image.new("L", (1536, 2048)))
+    assert result == payload
+    assert requests[0]["format"]["required"] == ["drawings"]
+    assert "ordinary handwriting" in requests[0]["messages"][0]["content"]
+    assert "complete figure" in requests[0]["messages"][0]["content"]
+
+
+def test_drawing_localizer_accepts_thinking_json(monkeypatch: Any) -> None:
+    payload = {"drawings": [{"bbox_2d": [0.0, 0.0, 1.0, 1.0]}]}
+    monkeypatch.setattr(
+        "urllib.request.urlopen",
+        lambda request, timeout: _ollama_response({"content": "", "thinking": json.dumps(payload)}),
+    )
+    result, _ = OllamaDrawingLocalizer(model="test").localize(Image.new("L", (20, 20)))
+    assert result == payload
+
+
+def test_drawing_padding_is_proportional_and_clamped() -> None:
+    assert pad_normalized_bounds((0.0, 0.0, 0.2, 0.4)) == pytest.approx((0.0, 0.0, 0.21, 0.42))
+    assert pad_normalized_bounds((0.9, 0.9, 1.0, 1.0)) == pytest.approx((0.895, 0.895, 1.0, 1.0))
 
 
 class FigureInterpreter:
@@ -302,3 +331,107 @@ def test_recovery_preserves_source_qwen_text_and_recognizer_evidence(tmp_path: P
     assert page.regions[0].text == "Calamondin"
     assert page.regions[0].bounds.left == 10
     assert json.loads(format_recovery(page))["regions"][0]["source"]["image"] == str(image_path)
+
+
+class PageOnlyInterpreter:
+    model = "fake-page-qwen"
+
+    def interpret(self, image: Image.Image) -> tuple[dict[str, Any], float]:
+        return {
+            "page_interpretation": {"text": ["Exact page text"]},
+            "page_text": ["Exact page text"],
+            "regions": [],
+        }, 11.0
+
+    def release(self) -> None:
+        pass
+
+
+class FakeDrawingLocalizer:
+    model = "fake-drawing-qwen"
+
+    def __init__(self, result: dict[str, Any], timing: float = 7.0) -> None:
+        self.result = result
+        self.timing = timing
+        self.response_metadata = {"response_fields": ["thinking"]}
+
+    def localize(self, image: Image.Image) -> tuple[dict[str, Any], float]:
+        assert image.size == (100, 100)
+        return self.result, self.timing
+
+    def release(self) -> None:
+        pass
+
+
+def test_dedicated_localization_preserves_text_descriptions_coordinates_and_markdown(
+    tmp_path: Path,
+) -> None:
+    image_path = tmp_path / "page.png"
+    source = Image.new("RGB", (100, 100), "white")
+    source.putpixel((50, 50), (255, 0, 0))
+    source.save(image_path)
+    page = recover_page(
+        image_path,
+        PageOnlyInterpreter(),
+        FailingRecognizer(),
+        drawing_localizer=FakeDrawingLocalizer(
+            {
+                "drawings": [
+                    {"bbox_2d": [0.4, 0.4, 0.6, 0.6], "description": "model evidence"},
+                    {"bbox_2d": [0.0, 0.0, 0.1, 0.1]},
+                ]
+            }
+        ),
+    )
+    assert page.page_text == ["Exact page text"]
+    assert len(page.regions) == 2
+    first = page.regions[0]
+    assert first.normalized_bounds == (0.4, 0.4, 0.6, 0.6)
+    assert first.source["provenance"] == ["drawing_localization"]
+    assert first.source["drawing_localization"]["description"] == "model evidence"
+    assert first.bounds == RegionBounds(39, 39, 61, 61)
+    assert Image.open(first.source["crop"]).size == (22, 22)
+    benchmark = page.runtime["benchmark"]
+    assert benchmark["page_recovery_ms"] == 11.0
+    assert benchmark["drawing_localization_ms"] == 7.0
+    assert benchmark["crop_ms"] >= 0
+    assert benchmark["trocr_attempts"] == 0
+    assert page.runtime["page_recovery"]["status"] == "success"
+    assert page.runtime["drawing_localization"]["status"] == "success"
+    markdown = write_markdown_recovery(page).read_text()
+    assert "Exact page text" in markdown
+    assert "![Figure 1](assets/figure-01.png)" in markdown
+    assert "model evidence" not in markdown
+
+
+def test_drawing_localization_failure_preserves_successful_page_text(tmp_path: Path) -> None:
+    image_path = tmp_path / "page.png"
+    Image.new("RGB", (100, 100), "white").save(image_path)
+    page = recover_page(
+        image_path,
+        PageOnlyInterpreter(),
+        FailingRecognizer(),
+        drawing_localizer=FakeDrawingLocalizer(
+            {"status": "failure", "error": "mock localization unavailable"}
+        ),
+    )
+    assert page.page_text == ["Exact page text"]
+    assert page.regions == []
+    assert page.runtime["drawing_localization"]["status"] == "failure"
+    assert "unavailable" in page.runtime["drawing_localization"]["error"]
+    assert page.runtime["benchmark"]["drawing_regions"] == 0
+
+
+def test_zero_drawings_is_a_successful_text_only_recovery(tmp_path: Path) -> None:
+    image_path = tmp_path / "page.png"
+    Image.new("RGB", (100, 100), "white").save(image_path)
+    page = recover_page(
+        image_path,
+        PageOnlyInterpreter(),
+        FailingRecognizer(),
+        drawing_localizer=FakeDrawingLocalizer({"drawings": []}),
+    )
+    assert page.page_text == ["Exact page text"]
+    assert page.regions == []
+    assert page.runtime["drawing_localization"]["status"] == "success"
+    assert page.runtime["benchmark"]["drawing_regions"] == 0

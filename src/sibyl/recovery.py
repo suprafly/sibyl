@@ -54,6 +54,7 @@ class RecoveredRegion:
     prepared_bounds: RegionBounds | None
     qwen_text: str | None
     text: str
+    normalized_bounds: tuple[float, float, float, float] | None = None
     candidates: list[RegionCandidate] = field(default_factory=list)
     source: dict[str, Any] = field(default_factory=dict)
     recognizer: dict[str, Any] = field(default_factory=dict)
@@ -71,6 +72,14 @@ class RecoveredPage:
 
 class PageInterpreter(Protocol):
     def interpret(self, image: Image.Image) -> tuple[dict[str, Any], float]: ...
+
+    def release(self) -> None: ...
+
+
+class DrawingLocalizer(Protocol):
+    model: str
+
+    def localize(self, image: Image.Image) -> tuple[dict[str, Any], float]: ...
 
     def release(self) -> None: ...
 
@@ -215,9 +224,7 @@ class OllamaPageInterpreter:
         return True
 
     @staticmethod
-    def _normalize_result(
-        result: dict[str, Any], prepared_size: tuple[int, int]
-    ) -> dict[str, Any]:
+    def _normalize_result(result: dict[str, Any], prepared_size: tuple[int, int]) -> dict[str, Any]:
         if "regions" in result:
             return result
         if "figures" in result:
@@ -232,29 +239,13 @@ class OllamaPageInterpreter:
             ]
             return result
         interpretation = result.get("page_interpretation", {})
+        if not isinstance(interpretation, dict):
+            return result
         page_text = interpretation.get("text", [])
         page_drawings = interpretation.get("drawing")
         if page_drawings is None:
             page_drawings = interpretation.get("diagram", [])
-        if page_text or page_drawings:
-            prepared_width, prepared_height = prepared_size
-            result["regions"] = [
-            ] + [
-                {
-                    "order": len(page_text) + index,
-                    "kind": "figure",
-                    "text": diagram["description"],
-                    "bbox_2d": [
-                        round(diagram["bbox"][0] * prepared_width),
-                        round(diagram["bbox"][1] * prepared_height),
-                        round(diagram["bbox"][2] * prepared_width),
-                        round(diagram["bbox"][3] * prepared_height),
-                    ],
-                }
-                for index, diagram in enumerate(page_drawings)
-            ]
-            result["page_text"] = page_text
-            return result
+        prepared_width, prepared_height = prepared_size
         text_regions = interpretation.get("text_regions", [])
         diagrams = interpretation.get("diagrams", [])
         result["regions"] = [
@@ -274,6 +265,21 @@ class OllamaPageInterpreter:
             }
             for index, diagram in enumerate(diagrams)
         ]
+        result["regions"] += [
+            {
+                "order": len(result["regions"]) + index,
+                "kind": "figure",
+                "text": diagram.get("description"),
+                "bbox_2d": [
+                    round(diagram["bbox"][0] * prepared_width),
+                    round(diagram["bbox"][1] * prepared_height),
+                    round(diagram["bbox"][2] * prepared_width),
+                    round(diagram["bbox"][3] * prepared_height),
+                ],
+            }
+            for index, diagram in enumerate(page_drawings or [])
+        ]
+        result["page_text"] = page_text
         return result
 
     @classmethod
@@ -306,34 +312,17 @@ class OllamaPageInterpreter:
                     "type": "object",
                     "properties": {
                         "text": {"type": "array", "items": {"type": "string"}},
-                        "drawing": {
-                            "type": "array",
-                            "items": {
-                                "type": "object",
-                                "properties": {
-                                    "bbox": {
-                                        "type": "array",
-                                        "items": {"type": "number"},
-                                        "minItems": 4,
-                                        "maxItems": 4,
-                                    },
-                                    "description": {"type": "string"},
-                                },
-                                "required": ["bbox", "description"],
-                            },
-                        },
                     },
-                    "required": ["text", "drawing"],
+                    "required": ["text"],
                 },
             },
             "required": ["page_interpretation"],
         }
         prompt = (
-            "Interpret this handwritten page. Return only JSON matching the schema. "
-            "Return ordered page-level text exactly as observed; do not enumerate "
-            "spatial text regions or invent text coordinates. Coordinates for drawings "
-            "are normalized 0..1 relative to the supplied image. Include zero or more "
-            "drawings in page_interpretation without inventing text."
+            "Recover this handwritten page. Return only JSON matching the schema. "
+            "Return ordered page-level text exactly as observed. Do not enumerate "
+            "spatial text regions, drawings, or invent coordinates. Do not perform "
+            "exhaustive text localization; a separate pass handles drawing localization."
         )
         payload = {
             "model": self.model,
@@ -390,6 +379,168 @@ class OllamaPageInterpreter:
         return None
 
 
+class OllamaDrawingLocalizer:
+    """Dedicated Qwen3-VL boundary for semantic drawing localization."""
+
+    def __init__(self, model: str | None = None, base_url: str | None = None) -> None:
+        self.model = model or os.environ.get("SIBYL_QWEN_MODEL", DEFAULT_QWEN_MODEL)
+        configured_url = base_url or os.environ.get("SIBYL_OLLAMA_URL", DEFAULT_OLLAMA_URL)
+        self.base_url = configured_url.rstrip("/")
+        self.response_metadata: dict[str, Any] = {}
+
+    @staticmethod
+    def _valid_result(result: Any) -> bool:
+        if not isinstance(result, dict) or not isinstance(result.get("drawings"), list):
+            return False
+        for drawing in result["drawings"]:
+            if not isinstance(drawing, dict):
+                return False
+            bbox = drawing.get("bbox_2d")
+            if not (
+                isinstance(bbox, list)
+                and len(bbox) == 4
+                and all(isinstance(value, (int, float)) and 0 <= value <= 1 for value in bbox)
+                and bbox[2] > bbox[0]
+                and bbox[3] > bbox[1]
+            ):
+                return False
+            if "description" in drawing and not isinstance(drawing["description"], str):
+                return False
+        return True
+
+    @classmethod
+    def _structured_message(
+        cls, message: dict[str, Any]
+    ) -> tuple[dict[str, Any] | None, bool, str | None]:
+        saw_json = False
+        unsupported_shape: str | None = None
+        for field_name in ("content", "thinking"):
+            candidate = message.get(field_name)
+            if not isinstance(candidate, str):
+                continue
+            try:
+                result = json.loads(candidate)
+            except json.JSONDecodeError:
+                continue
+            saw_json = True
+            if cls._valid_result(result):
+                return cast(dict[str, Any], result), saw_json, None
+            if isinstance(result, dict):
+                unsupported_shape = ", ".join(sorted(result)) or "object"
+        return None, saw_json, unsupported_shape
+
+    def localize(self, image: Image.Image) -> tuple[dict[str, Any], float]:
+        schema = {
+            "type": "object",
+            "properties": {
+                "drawings": {
+                    "type": "array",
+                    "items": {
+                        "type": "object",
+                        "properties": {
+                            "bbox_2d": {
+                                "type": "array",
+                                "items": {"type": "number", "minimum": 0, "maximum": 1},
+                                "minItems": 4,
+                                "maxItems": 4,
+                            },
+                            "description": {"type": "string"},
+                        },
+                        "required": ["bbox_2d"],
+                    },
+                }
+            },
+            "required": ["drawings"],
+        }
+        prompt = (
+            "Identify every distinct hand-drawn diagram, illustration, sketch, or visual "
+            "figure on this handwritten notebook page. Do not include ordinary handwriting, "
+            "headings, bullets, isolated words, page decorations, notebook dots/grid, or "
+            "individual letters that are part of ordinary text. A figure may contain "
+            "disconnected strokes, arrows, labels, whitespace, and multiple sequential stages; "
+            "treat a complete visual sequence as one figure when its parts clearly belong "
+            "together. For each figure, return one approximate normalized [x1, y1, x2, y2] "
+            "box covering the complete figure, including disconnected strokes, arrows, labels, "
+            "annotations, and relationship-preserving whitespace. Do not transcribe, OCR, or "
+            "enumerate text blocks. Return only the requested structured JSON."
+        )
+        payload = {
+            "model": self.model,
+            "stream": False,
+            "think": False,
+            "format": schema,
+            "keep_alive": 0,
+            "messages": [{"role": "user", "content": prompt, "images": [_image_data(image)]}],
+        }
+        started = time.perf_counter()
+        request = urllib.request.Request(
+            f"{self.base_url}/api/chat",
+            data=json.dumps(payload).encode(),
+            headers={"Content-Type": "application/json"},
+            method="POST",
+        )
+        try:
+            with urllib.request.urlopen(request, timeout=300) as response:
+                body = json.load(response)
+        except (urllib.error.URLError, TimeoutError, json.JSONDecodeError) as error:
+            self.response_metadata = {"response_fields": []}
+            return {
+                "status": "failure",
+                "error": (
+                    f"Unable to query Ollama/Qwen drawing localization ({self.model}): {error}"
+                ),
+            }, (time.perf_counter() - started) * 1000
+        message = body.get("message", {})
+        result, saw_json, unsupported_shape = self._structured_message(
+            message if isinstance(message, dict) else {}
+        )
+        self.response_metadata = {
+            "prompt_tokens": body.get("prompt_eval_count"),
+            "output_tokens": body.get("eval_count"),
+            "response_fields": [
+                field_name
+                for field_name in ("content", "thinking")
+                if isinstance(message, dict) and isinstance(message.get(field_name), str)
+            ],
+        }
+        if result is None:
+            if saw_json:
+                structured_error = (
+                    "Qwen returned valid JSON but unsupported drawing localization schema: "
+                    f"{unsupported_shape or 'unknown'}"
+                )
+            else:
+                structured_error = (
+                    "Ollama/Qwen returned no valid drawing localization JSON in content or thinking"
+                )
+            return {
+                "status": "failure",
+                "error": structured_error,
+                "raw_response": body,
+            }, (time.perf_counter() - started) * 1000
+        return result, (time.perf_counter() - started) * 1000
+
+    def release(self) -> None:
+        return None
+
+
+def pad_normalized_bounds(
+    bounds: tuple[float, float, float, float], proportion: float = 0.05
+) -> tuple[float, float, float, float]:
+    """Add deterministic proportional containment padding without shrinking a box."""
+    left, top, right, bottom = bounds
+    width = right - left
+    height = bottom - top
+    horizontal_padding = width * proportion
+    vertical_padding = height * proportion
+    return (
+        max(0.0, left - horizontal_padding),
+        max(0.0, top - vertical_padding),
+        min(1.0, right + horizontal_padding),
+        min(1.0, bottom + vertical_padding),
+    )
+
+
 def map_prepared_bounds(
     bounds: tuple[float, float, float, float],
     prepared_size: tuple[int, int],
@@ -432,9 +583,10 @@ def _bounds(
         )
     values = [float(item.get(key, 0)) for key in ("left", "top", "right", "bottom")]
     normalized = RegionBounds(
-        *(round(value * dimension) for value, dimension in zip(
-            values, (width, height, width, height), strict=True
-        ))
+        *(
+            round(value * dimension)
+            for value, dimension in zip(values, (width, height, width, height), strict=True)
+        )
     )
     return map_prepared_bounds(
         (
@@ -448,14 +600,53 @@ def _bounds(
     ), None
 
 
+def _normalized_to_prepared_bounds(
+    bounds: tuple[float, float, float, float], prepared_size: tuple[int, int]
+) -> RegionBounds:
+    width, height = prepared_size
+    left, top, right, bottom = (
+        round(bounds[0] * width),
+        round(bounds[1] * height),
+        round(bounds[2] * width),
+        round(bounds[3] * height),
+    )
+    return RegionBounds(
+        max(0, min(width - 1, left)),
+        max(0, min(height - 1, top)),
+        max(1, min(width, right)),
+        max(1, min(height, bottom)),
+    )
+
+
+def _legacy_drawing_normalized(
+    raw: dict[str, Any], source_size: tuple[int, int], prepared_size: tuple[int, int]
+) -> tuple[float, float, float, float]:
+    _, prepared_bounds = _bounds(raw, source_size, prepared_size)
+    if prepared_bounds is None:
+        source_bounds, _ = _bounds(raw, source_size, prepared_size)
+        return (
+            source_bounds.left / source_size[0],
+            source_bounds.top / source_size[1],
+            source_bounds.right / source_size[0],
+            source_bounds.bottom / source_size[1],
+        )
+    return (
+        prepared_bounds.left / prepared_size[0],
+        prepared_bounds.top / prepared_size[1],
+        prepared_bounds.right / prepared_size[0],
+        prepared_bounds.bottom / prepared_size[1],
+    )
+
+
 def recover_page(
     image_path: Path,
     interpreter: PageInterpreter | None = None,
     recognizer: Recognizer | None = None,
     *,
     recognizer_metadata: dict[str, Any] | None = None,
+    drawing_localizer: DrawingLocalizer | None = None,
 ) -> RecoveredPage:
-    """Interpret one source page, then recognize its identified regions."""
+    """Recover page text, then independently localize and crop its drawings."""
     recovery_started = time.perf_counter()
     if not image_path.is_file():
         raise FileNotFoundError(f"Image not found: {image_path}")
@@ -466,18 +657,71 @@ def recover_page(
         raise ValueError(f"Unable to read image: {image_path}") from error
 
     prepared = prepare_vlm_image_with_metadata(source)
+    supplied_interpreter = interpreter is not None
     interpreter = interpreter or OllamaPageInterpreter()
-    interpretation, qwen_ms = interpreter.interpret(prepared.image)
+    interpretation, page_recovery_ms = interpreter.interpret(prepared.image)
     interpreter.release()
     if interpretation.get("status") == "failure":
         failure_error = interpretation.get("error", "Qwen interpretation failed")
         raise RuntimeError(f"{failure_error}: {json.dumps(interpretation.get('raw_response'))}")
     raw_regions = sorted(
-        interpretation["regions"], key=lambda item: int(item.get("order", 0))
+        interpretation.get("regions", []), key=lambda item: int(item.get("order", 0))
     )
-    spatial_text_raw = [
-        raw for raw in raw_regions if str(raw.get("kind", "text")) != "figure"
-    ]
+    spatial_text_raw = [raw for raw in raw_regions if str(raw.get("kind", "text")) != "figure"]
+    if drawing_localizer is None and not supplied_interpreter:
+        drawing_localizer = OllamaDrawingLocalizer()
+
+    drawing_localization_ms = 0.0
+    drawing_localization_runtime: dict[str, Any] = {
+        "status": "not_run",
+        "model": getattr(drawing_localizer, "model", None),
+    }
+    drawing_entries: list[tuple[int, tuple[float, float, float, float], str | None, dict[str, Any]]]
+    if drawing_localizer is not None:
+        try:
+            localized, drawing_localization_ms = drawing_localizer.localize(prepared.image)
+            drawing_localizer.release()
+        except (RuntimeError, ValueError) as error:
+            localized = {
+                "status": "failure",
+                "error": str(error),
+            }
+            drawing_localization_runtime["status"] = "failure"
+            drawing_localization_runtime["error"] = str(error)
+        if localized.get("status") == "failure":
+            drawing_localization_runtime.update(
+                {
+                    "status": "failure",
+                    "error": localized.get("error", "drawing localization failed"),
+                }
+            )
+            drawing_entries = []
+        else:
+            drawing_localization_runtime["status"] = "success"
+            drawing_entries = []
+            for index, drawing in enumerate(localized.get("drawings", [])):
+                normalized_bbox = cast(
+                    tuple[float, float, float, float],
+                    tuple(float(value) for value in drawing["bbox_2d"]),
+                )
+                drawing_entries.append(
+                    (index, normalized_bbox, drawing.get("description"), drawing)
+                )
+    else:
+        # Compatibility for existing mocked page responses. The production path
+        # always uses the dedicated localizer above.
+        drawing_entries = [
+            (
+                int(raw.get("order", index)),
+                _legacy_drawing_normalized(raw, source.size, prepared.prepared_dimensions),
+                raw.get("text"),
+                raw,
+            )
+            for index, raw in enumerate(raw_regions)
+            if str(raw.get("kind", "text")) == "figure"
+        ]
+        if drawing_entries:
+            drawing_localization_runtime["status"] = "legacy_page_response"
     if spatial_text_raw and recognizer is None:
         recognizer, load_ms, cuda, device, gpu = TrocrRecognizer.from_local_cache()
         recognizer_metadata = {
@@ -498,44 +742,32 @@ def recover_page(
     figure_count = 0
     disagreements: list[dict[str, Any]] = []
     trocr_timings: list[dict[str, Any]] = []
-    for raw in raw_regions:
+    for raw in spatial_text_raw:
         bounds, prepared_bounds = _bounds(raw, source.size, prepared.prepared_dimensions)
         region_image = source.crop((bounds.left, bounds.top, bounds.right, bounds.bottom)).convert(
             "RGB"
         )
         kind = str(raw.get("kind", "text"))
-        crop_path: Path | None = None
-        if kind == "figure":
-            figure_count += 1
-            artifact_directory.mkdir(parents=True, exist_ok=True)
-            crop_path = artifact_directory / f"figure-{figure_count:02d}.png"
-            region_image.save(crop_path, format="PNG")
-            text = ""
-            inference_ms = 0.0
-            elapsed_ms = 0.0
-        else:
-            if recognizer is None:
-                raise RuntimeError("TrOCR recognizer is unavailable for a spatial text region")
-            started = time.perf_counter()
-            text, inference_ms = recognizer.recognize(region_image)
-            elapsed_ms = (time.perf_counter() - started) * 1000
-            trocr_timings.append(
+        if recognizer is None:
+            raise RuntimeError("TrOCR recognizer is unavailable for a spatial text region")
+        started = time.perf_counter()
+        text, inference_ms = recognizer.recognize(region_image)
+        elapsed_ms = (time.perf_counter() - started) * 1000
+        trocr_timings.append(
+            {
+                "order": int(raw.get("order", len(regions))),
+                "inference_ms": round(inference_ms, 3),
+            }
+        )
+        if raw.get("text") is not None and raw.get("text") != text:
+            disagreements.append(
                 {
                     "order": int(raw.get("order", len(regions))),
-                    "inference_ms": round(inference_ms, 3),
+                    "qwen": raw.get("text"),
+                    "trocr": text,
                 }
             )
-            if raw.get("text") is not None and raw.get("text") != text:
-                disagreements.append(
-                    {
-                        "order": int(raw.get("order", len(regions))),
-                        "qwen": raw.get("text"),
-                        "trocr": text,
-                    }
-                )
         source_metadata: dict[str, Any] = {"image": str(image_path), "bounds": asdict(bounds)}
-        if crop_path is not None:
-            source_metadata["crop"] = str(crop_path)
         regions.append(
             RecoveredRegion(
                 order=int(raw.get("order", len(regions))),
@@ -544,6 +776,7 @@ def recover_page(
                 prepared_bounds=prepared_bounds,
                 qwen_text=raw.get("text"),
                 text=text,
+                normalized_bounds=None,
                 source=source_metadata,
                 recognizer={
                     "inference_ms": round(inference_ms, 3),
@@ -551,20 +784,83 @@ def recover_page(
                 },
             )
         )
+    crop_started = time.perf_counter()
+    for order, normalized_bounds, description, localization_observation in drawing_entries:
+        padded_normalized = (
+            normalized_bounds
+            if drawing_localization_runtime["status"] == "legacy_page_response"
+            else pad_normalized_bounds(normalized_bounds)
+        )
+        prepared_bounds = _normalized_to_prepared_bounds(
+            padded_normalized, prepared.prepared_dimensions
+        )
+        bounds = map_prepared_bounds(
+            (
+                prepared_bounds.left,
+                prepared_bounds.top,
+                prepared_bounds.right,
+                prepared_bounds.bottom,
+            ),
+            prepared.prepared_dimensions,
+            source.size,
+        )
+        artifact_directory.mkdir(parents=True, exist_ok=True)
+        figure_count += 1
+        crop_path = artifact_directory / f"figure-{figure_count:02d}.png"
+        source.crop((bounds.left, bounds.top, bounds.right, bounds.bottom)).convert("RGB").save(
+            crop_path, format="PNG"
+        )
+        source_metadata = {
+            "image": str(image_path),
+            "bounds": asdict(bounds),
+            "prepared_bounds": asdict(prepared_bounds),
+            "normalized_bounds": normalized_bounds,
+            "padded_normalized_bounds": padded_normalized,
+            "crop": str(crop_path),
+            "provenance": ["drawing_localization"],
+            "drawing_localization": localization_observation,
+        }
+        regions.append(
+            RecoveredRegion(
+                order=order,
+                kind="figure",
+                bounds=bounds,
+                prepared_bounds=prepared_bounds,
+                qwen_text=description,
+                text="",
+                normalized_bounds=normalized_bounds,
+                source=source_metadata,
+                recognizer={"status": "not_applicable"},
+            )
+        )
+    crop_ms = (time.perf_counter() - crop_started) * 1000 if figure_count else 0.0
     response_metadata = getattr(interpreter, "response_metadata", {})
     total_ms = (time.perf_counter() - recovery_started) * 1000
     drawing_count = sum(region.kind == "figure" for region in regions)
     spatial_text_count = len(regions) - drawing_count
     runtime = {
         "vlm_model": getattr(interpreter, "model", None),
-        "vlm_ms": round(qwen_ms, 3),
+        "vlm_ms": round(page_recovery_ms, 3),
         "vlm_dimensions": {
             "width": prepared.prepared_dimensions[0],
             "height": prepared.prepared_dimensions[1],
         },
+        "page_recovery": {
+            "status": "success",
+            "model": getattr(interpreter, "model", None),
+            "timing_ms": round(page_recovery_ms, 3),
+            "response_metadata": response_metadata,
+        },
+        "drawing_localization": {
+            **drawing_localization_runtime,
+            "timing_ms": round(drawing_localization_ms, 3),
+            "response_metadata": getattr(drawing_localizer, "response_metadata", {}),
+        },
         "recognizer": recognizer_metadata,
         "benchmark": {
             "model": getattr(interpreter, "model", None),
+            "page_recovery_model": getattr(interpreter, "model", None),
+            "drawing_localization_model": getattr(drawing_localizer, "model", None),
             "runtime": "ollama",
             "preparation_dimensions": {
                 "width": prepared.prepared_dimensions[0],
@@ -573,7 +869,10 @@ def recover_page(
             "source_dimensions": {"width": source.width, "height": source.height},
             "scale": prepared.scale,
             "preparation_ms": round(prepared.preparation_ms, 3),
-            "qwen_ms": round(qwen_ms, 3),
+            "qwen_ms": round(page_recovery_ms, 3),
+            "page_recovery_ms": round(page_recovery_ms, 3),
+            "drawing_localization_ms": round(drawing_localization_ms, 3),
+            "crop_ms": round(crop_ms, 3),
             "prompt_tokens": response_metadata.get("prompt_tokens"),
             "output_tokens": response_metadata.get("output_tokens"),
             "region_count": len(regions),
@@ -591,7 +890,9 @@ def recover_page(
         interpretation=interpretation.get("page_interpretation", {}),
         regions=regions,
         runtime=runtime,
-        page_text=interpretation.get("page_text", []),
+        page_text=interpretation.get(
+            "page_text", interpretation.get("page_interpretation", {}).get("text", [])
+        ),
     )
 
 
@@ -642,7 +943,7 @@ def write_markdown_recovery(page: RecoveredPage) -> Path:
             if crop_path.resolve() != target.resolve():
                 assets_directory.mkdir(parents=True, exist_ok=True)
                 shutil.copy2(crop_path, target)
-            label = region.qwen_text or f"Figure {figure_count:02d}"
+            label = f"Figure {figure_count}"
             markdown_lines.append(f"![{label}](assets/{target.name})")
             continue
         if not region.text:
