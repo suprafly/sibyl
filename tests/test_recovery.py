@@ -165,6 +165,58 @@ def test_qwen_prompt_requests_page_text_and_drawings_not_spatial_text(monkeypatc
     assert "spatial text regions" in request["messages"][0]["content"]
 
 
+def test_qwen_page_prompt_separates_figures_and_requires_faithful_transcription(
+    monkeypatch: Any,
+) -> None:
+    requests: list[dict[str, Any]] = []
+
+    def urlopen(request: Any, timeout: int) -> _Response:
+        requests.append(json.loads(request.data))
+        return _ollama_response(
+            {
+                "content": json.dumps(
+                    {
+                        "page_interpretation": {
+                            "text": [
+                                "Xylem",
+                                "Scion",
+                                "Splice grafting - what we will do now.",
+                            ]
+                        }
+                    }
+                )
+            }
+        )
+
+    monkeypatch.setattr("urllib.request.urlopen", urlopen)
+    result, _ = OllamaPageInterpreter(model="test").interpret(Image.new("L", (20, 20)))
+    prompt = requests[0]["messages"][0]["content"]
+    for instruction in (
+        "ordinary handwritten notes",
+        "diagram arrows",
+        "diagram-only marks",
+        "annotations visually attached to a figure",
+        "without duplication in page_text",
+        "preserve wording, spelling",
+        "unfamiliar technical words",
+        "Do not normalize terminology",
+        "autocorrect",
+        "semantically correct",
+        "based on context",
+        "[unclear]",
+    ):
+        assert instruction in prompt
+    assert result["page_text"] == [
+        "Xylem",
+        "Scion",
+        "Splice grafting - what we will do now.",
+    ]
+    assert "↓" not in result["page_text"]
+    assert "→" not in result["page_text"]
+    assert "←" not in result["page_text"]
+    assert "urds" not in result["page_text"]
+
+
 def test_qwen_invalid_structured_output_is_explicit(monkeypatch: Any) -> None:
     monkeypatch.setattr(
         "urllib.request.urlopen",

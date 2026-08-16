@@ -321,9 +321,21 @@ class OllamaPageInterpreter:
         }
         prompt = (
             "Recover this handwritten page. Return only JSON matching the schema. "
-            "Return ordered page-level text exactly as observed. Do not enumerate "
-            "spatial text regions, drawings, or invent coordinates. Do not perform "
-            "exhaustive text localization; a separate pass handles drawing localization."
+            "Return ordered page-level text exactly as visibly written in ordinary "
+            "handwritten notes. Page text owns notes, not visual figures. Exclude "
+            "diagram arrows, strokes, grafting cuts, lines forming a figure, visual "
+            "connectors, diagram-only marks, isolated symbols belonging to a figure, "
+            "and annotations visually attached to a figure. Do not turn figure content "
+            "into page-level prose or standalone symbols; the separate drawing pass "
+            "preserves it in the figure crop, without duplication in page_text. "
+            "Transcribe visible letterforms faithfully: preserve wording, spelling, "
+            "capitalization, punctuation, shorthand, and unfamiliar technical words. "
+            "Do not normalize terminology, autocorrect, semantically correct, or "
+            "substitute a more likely word based on context. Read what is visibly "
+            "written rather than what you expect; use [unclear] only when the word is "
+            "genuinely unreadable. Do not enumerate spatial text regions, drawings, "
+            "or invent coordinates. Do not perform exhaustive text localization; a "
+            "separate pass handles drawing localization."
         )
         payload = {
             "model": self.model,
