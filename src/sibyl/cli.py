@@ -21,6 +21,13 @@ from sibyl.experiments.transcription_variance import (
     run_variance_experiment,
 )
 from sibyl.experiments.trocr import format_result, run_experiment
+from sibyl.experiments.trocr_compare import (
+    DEFAULT_OUTPUT as TROCR_COMPARE_DEFAULT_OUTPUT,
+)
+from sibyl.experiments.trocr_compare import (
+    format_compare_result,
+    run_compare_experiment,
+)
 from sibyl.transform import (
     format_text_transform,
     format_transform,
@@ -66,6 +73,17 @@ def build_parser() -> argparse.ArgumentParser:
         type=int,
         default=DEFAULT_RUNS,
         help=f"independent regional reads per crop (default: {DEFAULT_RUNS})",
+    )
+    compare = experiment_commands.add_parser(
+        "trocr-compare", help="compare Qwen and TrOCR on identical source-resolution crops"
+    )
+    compare.add_argument("image", type=Path, help="page image")
+    compare.add_argument("--runs", type=int, default=DEFAULT_RUNS, help="reads per recognizer")
+    compare.add_argument(
+        "--regions", help="comma-separated region IDs (default: all accepted coarse regions)"
+    )
+    compare.add_argument(
+        "--output", type=Path, default=None, help="experimental JSON output path"
     )
     reread.add_argument(
         "--output",
@@ -117,6 +135,18 @@ def main(argv: Sequence[str] | None = None) -> int:
             print(f"sibyl: error: {error}", file=__import__("sys").stderr)
             return 2
         print(format_reread_result(reread_result))
+    if arguments.command == "experiment" and arguments.experiment_name == "trocr-compare":
+        try:
+            compare_result = run_compare_experiment(
+                arguments.image,
+                runs=arguments.runs,
+                regions=arguments.regions,
+                output_path=arguments.output or TROCR_COMPARE_DEFAULT_OUTPUT,
+            )
+        except (FileNotFoundError, RuntimeError, ValueError) as error:
+            print(f"sibyl: error: {error}", file=__import__("sys").stderr)
+            return 2
+        print(format_compare_result(compare_result))
     if arguments.command == "run":
         try:
             page = transform_page(arguments.image)
