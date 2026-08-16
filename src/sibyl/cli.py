@@ -8,7 +8,12 @@ from pathlib import Path
 
 from sibyl import __version__
 from sibyl.experiments.trocr import format_result, run_experiment
-from sibyl.recovery import format_recovery, recover_page
+from sibyl.recovery import (
+    format_recovery,
+    format_text_recovery,
+    recover_page,
+    write_markdown_recovery,
+)
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -27,6 +32,9 @@ def build_parser() -> argparse.ArgumentParser:
     trocr.add_argument("--json", action="store_true", help="emit the result as JSON")
     recover_parser = commands.add_parser("recover", help="recover one handwritten page")
     recover_parser.add_argument("image", type=Path, help="page image")
+    output = recover_parser.add_mutually_exclusive_group()
+    output.add_argument("--markdown", action="store_true", help="write a Markdown projection")
+    output.add_argument("--json", action="store_true", help="emit the structured recovery JSON")
     return parser
 
 
@@ -44,7 +52,14 @@ def main(argv: Sequence[str] | None = None) -> int:
         print(format_result(result, arguments.json))
     if arguments.command == "recover":
         try:
-            print(format_recovery(recover_page(arguments.image)))
+            page = recover_page(arguments.image)
+            if arguments.json:
+                print(format_recovery(page))
+            elif arguments.markdown:
+                output_path = write_markdown_recovery(page)
+                print(f"wrote Markdown recovery: {output_path}")
+            else:
+                print(format_text_recovery(page))
         except (FileNotFoundError, RuntimeError, ValueError) as error:
             print(f"sibyl: error: {error}", file=__import__("sys").stderr)
             return 2
