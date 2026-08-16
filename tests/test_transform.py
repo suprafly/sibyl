@@ -9,6 +9,7 @@ from PIL import Image
 from sibyl.transform import (
     OllamaDrawingLocalizer,
     OllamaPageInterpreter,
+    OllamaTextLocalizer,
     RegionBounds,
     format_transform,
     map_prepared_bounds,
@@ -148,7 +149,7 @@ def test_qwen_page_interpretation_shape_from_thinking_is_normalized(monkeypatch:
     )
 
 
-def test_qwen_prompt_requests_page_text_and_drawings_not_spatial_text(monkeypatch: Any) -> None:
+def test_qwen_page_prompt_is_not_responsible_for_spatial_text(monkeypatch: Any) -> None:
     requests: list[dict[str, Any]] = []
 
     def urlopen(request: Any, timeout: int) -> _Response:
@@ -162,7 +163,53 @@ def test_qwen_prompt_requests_page_text_and_drawings_not_spatial_text(monkeypatc
     request = requests[0]
     assert "regions" not in request["format"]["properties"]
     assert "handwritten notes" in request["messages"][0]["content"]
-    assert "spatial text regions" in request["messages"][0]["content"]
+    assert "spatial text regions" not in request["messages"][0]["content"]
+
+
+@pytest.mark.parametrize(
+    "payload",
+    [
+        {"text_regions": [{"bbox_2d": [110, 120, 290, 160]}]},
+        {
+            "text_regions": [
+                {"bbox_2d": [110, 120, 290, 160]},
+                {"bbox_2d": [145, 165, 960, 305]},
+            ]
+        },
+        {"text_regions": []},
+    ],
+)
+def test_qwen_text_localizer_accepts_minimal_bbox_only_responses(
+    monkeypatch: Any, payload: dict[str, Any]
+) -> None:
+    requests: list[dict[str, Any]] = []
+
+    def urlopen(request: Any, timeout: int) -> _Response:
+        requests.append(json.loads(request.data))
+        return _ollama_response({"content": json.dumps(payload)})
+
+    monkeypatch.setattr("urllib.request.urlopen", urlopen)
+    result, _ = OllamaTextLocalizer(model="test").localize(Image.new("L", (20, 20)))
+    assert result["text_regions"] == payload["text_regions"]
+    schema = requests[0]["format"]
+    assert list(schema["properties"]) == ["text_regions"]
+    assert list(schema["properties"]["text_regions"]["items"]["properties"]) == ["bbox_2d"]
+    prompt = requests[0]["messages"][0]["content"]
+    assert "Return only the requested JSON." in prompt
+    assert "transcrib" not in prompt.lower()
+    assert "reading order" not in prompt.lower()
+
+
+def test_qwen_text_localizer_rejects_malformed_response_explicitly(monkeypatch: Any) -> None:
+    monkeypatch.setattr(
+        "urllib.request.urlopen",
+        lambda request, timeout: _ollama_response(
+            {"content": json.dumps({"text_regions": [{"bbox_2d": [1, 2, 3]}]})}
+        ),
+    )
+    result, _ = OllamaTextLocalizer(model="test").localize(Image.new("L", (20, 20)))
+    assert result["status"] == "failure"
+    assert "unsupported text localization schema" in result["error"]
 
 
 def test_qwen_page_prompt_preserves_text_near_figures_and_excludes_graphics(
@@ -709,6 +756,81 @@ class SpatialTextInterpreter:
         pass
 
 
+class MinimalTextLocalizer:
+    model = "fake-text-qwen"
+
+    def __init__(self, bboxes: list[list[int]], timing: float = 3.0) -> None:
+        self.bboxes = bboxes
+        self.timing = timing
+        self.response_metadata = {"response_fields": ["content"]}
+
+    def localize(self, image: Image.Image) -> tuple[dict[str, Any], float]:
+        assert image.size in {(1536, 2048), (100, 100)}
+        return {"text_regions": [{"bbox_2d": bbox} for bbox in self.bboxes]}, self.timing
+
+    def release(self) -> None:
+        pass
+
+
+def test_minimal_bbox_response_is_ordered_and_composed_with_trocr(tmp_path: Path) -> None:
+    image_path = tmp_path / "page.png"
+    Image.new("RGB", (3900, 5200), "white").save(image_path)
+    bboxes = [
+        [145, 405, 970, 530],
+        [110, 120, 290, 160],
+        [105, 555, 880, 680],
+        [145, 165, 960, 305],
+        [110, 345, 300, 400],
+    ]
+    recognizer = RecordingRecognizer(["one", "two", "three", "four", "five"])
+    page = transform_page(
+        image_path,
+        PageOnlyInterpreter(),
+        recognizer,
+        text_localizer=MinimalTextLocalizer(bboxes),
+        recognizer_metadata={"device": "cpu"},
+    )
+    assert [region.order for region in page.regions] == [1, 2, 3, 4, 5]
+    assert [region.text for region in page.regions] == ["one", "two", "three", "four", "five"]
+    assert [region.source["model_bbox"] for region in page.regions] == [
+        [110, 120, 290, 160],
+        [145, 165, 960, 305],
+        [110, 345, 300, 400],
+        [145, 405, 970, 530],
+        [105, 555, 880, 680],
+    ]
+    assert page.runtime["benchmark"]["spatial_text_regions"] == 5
+    assert page.runtime["benchmark"]["trocr_attempts"] == 5
+    assert page.runtime["text_localization"]["status"] == "success"
+    assert page.runtime["benchmark"]["text_localization_ms"] == 3.0
+    assets = sorted((tmp_path / "page.sibyl" / "assets").glob("text-*.png"))
+    assert [path.name for path in assets] == [
+        "text-01.png",
+        "text-02.png",
+        "text-03.png",
+        "text-04.png",
+        "text-05.png",
+    ]
+
+
+def test_zero_bbox_response_does_not_attempt_trocr_or_create_full_page_crop(
+    tmp_path: Path,
+) -> None:
+    image_path = tmp_path / "page.png"
+    Image.new("RGB", (100, 100), "white").save(image_path)
+    page = transform_page(
+        image_path,
+        PageOnlyInterpreter(),
+        FailingRecognizer(),
+        text_localizer=MinimalTextLocalizer([]),
+    )
+    assert page.page_text == ["Exact page text"]
+    assert page.regions == []
+    assert page.runtime["benchmark"]["spatial_text_regions"] == 0
+    assert page.runtime["benchmark"]["trocr_attempts"] == 0
+    assert not list((tmp_path / "page.sibyl" / "assets").glob("text-*.png"))
+
+
 class RecordingRecognizer:
     def __init__(self, texts: list[str], fail_at: int | None = None) -> None:
         self.texts = texts
@@ -785,7 +907,7 @@ def test_spatial_trocr_failure_is_explicit_and_does_not_use_qwen_as_canonical(
         recognizer_metadata={"device": "cpu"},
     )
     first = page.regions[0]
-    assert first.text == "[unclear]"
+    assert first.text == ""
     assert first.qwen_text == "qwen first"
     assert first.recognizer["status"] == "failure"
     assert "mock TrOCR failure" in first.recognizer["error"]

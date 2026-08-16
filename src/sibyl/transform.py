@@ -85,6 +85,14 @@ class DrawingLocalizer(Protocol):
     def release(self) -> None: ...
 
 
+class TextLocalizer(Protocol):
+    model: str
+
+    def localize(self, image: Image.Image) -> tuple[dict[str, Any], float]: ...
+
+    def release(self) -> None: ...
+
+
 TEXT_REGION_PADDING = 0.02
 
 
@@ -133,11 +141,9 @@ def _valid_text_region_list(regions: Any) -> bool:
         return False
     return all(
         isinstance(region, dict)
+        and set(region) == {"bbox_2d"}
         and isinstance(region.get("bbox_2d"), list)
         and _valid_qwen_bbox(region["bbox_2d"])
-        and (region.get("order") is None or isinstance(region.get("order"), int))
-        and (region.get("kind") is None or region.get("kind") == "text")
-        and (region.get("text") is None or isinstance(region.get("text"), str))
         for region in regions
     )
 
@@ -340,24 +346,6 @@ class OllamaPageInterpreter:
                     "type": "object",
                     "properties": {
                         "text": {"type": "array", "items": {"type": "string"}},
-                        "text_regions": {
-                            "type": "array",
-                            "items": {
-                                "type": "object",
-                                "properties": {
-                                    "order": {"type": "integer"},
-                                    "kind": {"type": "string", "enum": ["text"]},
-                                    "bbox_2d": {
-                                        "type": "array",
-                                        "items": {"type": "number", "minimum": 0, "maximum": 1000},
-                                        "minItems": 4,
-                                        "maxItems": 4,
-                                    },
-                                    "text": {"type": "string"},
-                                },
-                                "required": ["order", "kind", "bbox_2d"],
-                            },
-                        },
                         "drawings": {"type": "array"},
                     },
                     "required": ["text"],
@@ -366,7 +354,8 @@ class OllamaPageInterpreter:
             "required": ["page_interpretation"],
         }
         prompt = (
-            "Transform this handwritten page. Return only JSON matching the schema. "
+            "Transcribe the ordinary handwritten notes visible on this page. Return only JSON "
+            "matching the schema. "
             "Transcribe the ordinary handwritten notes and textual marks visible on the page "
             "in reading "
             "order. Read the actual handwriting and preserve the wording, spelling, "
@@ -379,15 +368,8 @@ class OllamaPageInterpreter:
             "connectors that clearly function as graphics. A handwritten word remains "
             "text even when it is physically near a drawing; do not exclude text merely "
             "because it is beside, above, below, or adjacent to a figure. Do not "
-            "Do not treat arrows, diagram strokes, connectors, grafting cuts, or isolated "
-            "drawing symbols as text. Return page-level text plus spatial text regions "
-            "(`text_regions`) in "
-            "reading order. Each text region must be a coherent handwritten block with "
-            "order, kind=text, bbox_2d in Qwen3-VL 0..1000 coordinates, and optional text "
-            "as model evidence. Do not make one region per word unless it is independently "
-            "identified. Keep drawing content out of text_regions; the dedicated drawing "
-            "localization pass owns figures. Qwen region text is evidence, not the canonical "
-            "transcription."
+            "treat arrows, diagram strokes, connectors, grafting cuts, or isolated "
+            "drawing symbols as text."
         )
         payload = {
             "model": self.model,
@@ -441,6 +423,127 @@ class OllamaPageInterpreter:
 
     def release(self) -> None:
         # keep_alive=0 on the interpretation request asks Ollama to release the model.
+        return None
+
+
+class OllamaTextLocalizer:
+    """Dedicated bbox-only Qwen3-VL boundary for handwritten text regions."""
+
+    def __init__(self, model: str | None = None, base_url: str | None = None) -> None:
+        self.model = model or os.environ.get("SIBYL_QWEN_MODEL", DEFAULT_QWEN_MODEL)
+        configured_url = base_url or os.environ.get("SIBYL_OLLAMA_URL", DEFAULT_OLLAMA_URL)
+        self.base_url = configured_url.rstrip("/")
+        self.response_metadata: dict[str, Any] = {}
+
+    @staticmethod
+    def _valid_result(result: Any) -> bool:
+        return isinstance(result, dict) and _valid_text_region_list(result.get("text_regions"))
+
+    @classmethod
+    def _structured_message(
+        cls, message: dict[str, Any]
+    ) -> tuple[dict[str, Any] | None, bool, str | None]:
+        saw_json = False
+        unsupported_shape: str | None = None
+        for field_name in ("content", "thinking"):
+            candidate = message.get(field_name)
+            if not isinstance(candidate, str):
+                continue
+            try:
+                result = json.loads(candidate)
+            except json.JSONDecodeError:
+                continue
+            saw_json = True
+            if cls._valid_result(result):
+                return cast(dict[str, Any], result), saw_json, None
+            if isinstance(result, dict):
+                unsupported_shape = ", ".join(sorted(result)) or "object"
+        return None, saw_json, unsupported_shape
+
+    def localize(self, image: Image.Image) -> tuple[dict[str, Any], float]:
+        schema = {
+            "type": "object",
+            "properties": {
+                "text_regions": {
+                    "type": "array",
+                    "items": {
+                        "type": "object",
+                        "properties": {
+                            "bbox_2d": {
+                                "type": "array",
+                                "items": {"type": "number", "minimum": 0, "maximum": 1000},
+                                "minItems": 4,
+                                "maxItems": 4,
+                            }
+                        },
+                        "required": ["bbox_2d"],
+                        "additionalProperties": False,
+                    },
+                }
+            },
+            "required": ["text_regions"],
+            "additionalProperties": False,
+        }
+        prompt = (
+            "Identify every distinct region of handwritten textual notes on this page.\n\n"
+            "Return one bounding box for each coherent text block.\n\n"
+            "Do not include arrows, diagram strokes, drawing lines, graphical connectors,\n"
+            "or other purely graphical elements.\n\n"
+            "Handwritten words remain text even when they are near a drawing.\n\n"
+            "Return only the requested JSON."
+        )
+        payload = {
+            "model": self.model,
+            "stream": False,
+            "think": False,
+            "format": schema,
+            "keep_alive": 0,
+            "messages": [{"role": "user", "content": prompt, "images": [_image_data(image)]}],
+        }
+        started = time.perf_counter()
+        request = urllib.request.Request(
+            f"{self.base_url}/api/chat",
+            data=json.dumps(payload).encode(),
+            headers={"Content-Type": "application/json"},
+            method="POST",
+        )
+        try:
+            with urllib.request.urlopen(request, timeout=300) as response:
+                body = json.load(response)
+        except (urllib.error.URLError, TimeoutError, json.JSONDecodeError) as error:
+            self.response_metadata = {"response_fields": []}
+            return {
+                "status": "failure",
+                "error": f"Unable to query Ollama/Qwen text localization ({self.model}): {error}",
+            }, (time.perf_counter() - started) * 1000
+        message = body.get("message", {})
+        result, saw_json, unsupported_shape = self._structured_message(
+            message if isinstance(message, dict) else {}
+        )
+        self.response_metadata = {
+            "prompt_tokens": body.get("prompt_eval_count"),
+            "output_tokens": body.get("eval_count"),
+            "response_fields": [
+                field_name
+                for field_name in ("content", "thinking")
+                if isinstance(message, dict) and isinstance(message.get(field_name), str)
+            ],
+        }
+        if result is None:
+            structured_error = (
+                "Qwen returned valid JSON but unsupported text localization schema: "
+                f"{unsupported_shape or 'unknown'}"
+                if saw_json
+                else "Ollama/Qwen returned no valid text localization JSON in content or thinking"
+            )
+            return {"status": "failure", "error": structured_error, "raw_response": body}, (
+                time.perf_counter() - started
+            ) * 1000
+        return {"text_regions": result["text_regions"], "raw_response": body}, (
+            time.perf_counter() - started
+        ) * 1000
+
+    def release(self) -> None:
         return None
 
 
@@ -796,6 +899,7 @@ def transform_page(
     *,
     recognizer_metadata: dict[str, Any] | None = None,
     drawing_localizer: DrawingLocalizer | None = None,
+    text_localizer: TextLocalizer | None = None,
 ) -> TransformedPage:
     """Transform page text, then independently localize and crop its drawings."""
     transform_started = time.perf_counter()
@@ -815,10 +919,47 @@ def transform_page(
     if interpretation.get("status") == "failure":
         failure_error = interpretation.get("error", "Qwen interpretation failed")
         raise RuntimeError(f"{failure_error}: {json.dumps(interpretation.get('raw_response'))}")
-    raw_regions = sorted(
-        interpretation.get("regions", []), key=lambda item: int(item.get("order", 0))
+    raw_regions = interpretation.get("regions", [])
+    text_localization_ms = 0.0
+    text_localization_runtime: dict[str, Any] = {
+        "status": "legacy_page_response" if supplied_interpreter else "not_run",
+        "model": getattr(text_localizer, "model", None),
+    }
+    localized_text_response: dict[str, Any] | None = None
+    if text_localizer is None and not supplied_interpreter:
+        text_localizer = OllamaTextLocalizer()
+    if text_localizer is not None:
+        try:
+            localized_text_response, text_localization_ms = text_localizer.localize(prepared.image)
+            text_localizer.release()
+        except (RuntimeError, ValueError) as error:
+            localized_text_response = {"status": "failure", "error": str(error)}
+        if localized_text_response.get("status") == "failure":
+            text_localization_runtime.update(
+                {"status": "failure", "error": localized_text_response.get("error")}
+            )
+            spatial_text_raw: list[dict[str, Any]] = []
+        else:
+            text_localization_runtime["status"] = "success"
+            spatial_text_raw = [
+                {**region, "kind": "text"}
+                for region in localized_text_response.get("text_regions", [])
+            ]
+    else:
+        spatial_text_raw = [
+            raw for raw in raw_regions if str(raw.get("kind", "text")) != "figure"
+        ]
+    spatial_text_raw = sorted(
+        spatial_text_raw,
+        key=lambda item: (
+            float(item.get("bbox_2d", [0, 0, 0, 0])[1]),
+            float(item.get("bbox_2d", [0, 0, 0, 0])[0]),
+        ),
     )
-    spatial_text_raw = [raw for raw in raw_regions if str(raw.get("kind", "text")) != "figure"]
+    spatial_text_raw = [
+        {**raw, "order": index + 1}
+        for index, raw in enumerate(spatial_text_raw)
+    ]
     if drawing_localizer is None and not supplied_interpreter:
         drawing_localizer = OllamaDrawingLocalizer()
 
@@ -953,7 +1094,7 @@ def transform_page(
             trocr_timings.append({"order": order, "inference_ms": round(inference_ms, 3)})
         except Exception as error:  # A bad crop must not discard the page transform.
             elapsed_ms = (time.perf_counter() - started) * 1000
-            text = "[unclear]"
+            text = ""
             inference_ms = 0.0
             trocr_failures += 1
             recognizer_observation = {
@@ -1119,8 +1260,14 @@ def transform_page(
             "response_metadata": response_metadata,
         },
         "text_localization": {
-            "status": "success",
-            "timing_ms": round(page_transform_ms, 3),
+            **text_localization_runtime,
+            "timing_ms": round(text_localization_ms, 3),
+            "response_metadata": getattr(text_localizer, "response_metadata", {}),
+            "raw_response": (
+                localized_text_response.get("raw_response")
+                if localized_text_response is not None
+                else None
+            ),
             "regions": spatial_text_count,
         },
         "drawing_localization": {
@@ -1144,7 +1291,7 @@ def transform_page(
             "qwen_ms": round(page_transform_ms, 3),
             "page_transform_ms": round(page_transform_ms, 3),
             "drawing_localization_ms": round(drawing_localization_ms, 3),
-            "text_localization_ms": round(page_transform_ms, 3),
+            "text_localization_ms": round(text_localization_ms, 3),
             "crop_ms": round(crop_ms, 3),
             "prompt_tokens": response_metadata.get("prompt_tokens"),
             "output_tokens": response_metadata.get("output_tokens"),
