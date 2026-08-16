@@ -21,6 +21,7 @@ from sibyl.transform import (
     DEFAULT_OLLAMA_URL,
     DEFAULT_QWEN_MODEL,
     PreparedVlmImage,
+    RegionBounds,
     map_prepared_bounds,
     pad_normalized_bounds,
     prepare_page_image_with_metadata,
@@ -30,6 +31,7 @@ from sibyl.transform import (
 DEFAULT_RUNS = 5
 DEFAULT_OUTPUT = Path(".sibyl/experiments/transcription-reread.json")
 LOCALIZATION_NUM_PREDICT = 512
+LINE_LOCALIZATION_NUM_PREDICT = 256
 REGIONAL_NUM_PREDICT = 256
 LOCALIZATION_PROMPT = (
     "Identify handwritten text regions in this image. Return only the requested JSON structure: "
@@ -59,6 +61,35 @@ LOCALIZATION_SCHEMA = {
     },
     "required": ["text_regions"],
 }
+LINE_LOCALIZATION_PROMPT = (
+    "Identify handwritten text lines in this crop. Return only the requested JSON structure: "
+    "text_lines containing bbox_2d with exactly four numeric values [x1, y1, x2, y2] in "
+    "Qwen's 0..1000 coordinate space relative to this crop. Use no prose, OCR, reasoning, "
+    "commentary, or extra values."
+)
+LINE_LOCALIZATION_SCHEMA = {
+    "type": "object",
+    "additionalProperties": False,
+    "properties": {
+        "text_lines": {
+            "type": "array",
+            "items": {
+                "type": "object",
+                "additionalProperties": False,
+                "properties": {
+                    "bbox_2d": {
+                        "type": "array",
+                        "items": {"type": "number"},
+                        "minItems": 4,
+                        "maxItems": 4,
+                    }
+                },
+                "required": ["bbox_2d"],
+            },
+        }
+    },
+    "required": ["text_lines"],
+}
 REGIONAL_PROMPT = (
     "Read the handwritten text in this image exactly as written. Return only the text. "
     "Do not interpret diagrams or surrounding page content. Preserve uncertainty rather "
@@ -73,6 +104,14 @@ PADDING_PROPORTION = 0.05
 
 
 class TextRegionLocalizer(Protocol):
+    model: str
+
+    def localize(self, image: Image.Image) -> tuple[dict[str, Any], float]: ...
+
+    def release(self) -> None: ...
+
+
+class TextLineLocalizer(Protocol):
     model: str
 
     def localize(self, image: Image.Image) -> tuple[dict[str, Any], float]: ...
@@ -194,6 +233,54 @@ class OllamaTextRegionLocalizer:
         return None
 
 
+class OllamaTextLineLocalizer:
+    """Experimental line localizer operating in one coarse crop's frame."""
+
+    def __init__(
+        self,
+        observer: Callable[[dict[str, Any]], None] | None = None,
+        model: str | None = None,
+        base_url: str | None = None,
+    ) -> None:
+        self.model = model or os.environ.get("SIBYL_QWEN_MODEL", DEFAULT_QWEN_MODEL)
+        self.base_url = (base_url or os.environ.get("SIBYL_OLLAMA_URL", DEFAULT_OLLAMA_URL)).rstrip(
+            "/"
+        )
+        self._observer = observer
+
+    def localize(self, image: Image.Image) -> tuple[dict[str, Any], float]:
+        body, duration_ms = _query_ollama(
+            model=self.model,
+            base_url=self.base_url,
+            prompt=LINE_LOCALIZATION_PROMPT,
+            schema=LINE_LOCALIZATION_SCHEMA,
+            image=image,
+            num_predict=LINE_LOCALIZATION_NUM_PREDICT,
+            observer=self._observer,
+        )
+        parsed = _message_json(body)
+        truncated = body.get("done_reason") == "length"
+        if not isinstance(parsed, dict) or not isinstance(parsed.get("text_lines"), list):
+            return {
+                "status": "truncated_response" if truncated else "invalid_response",
+                "error": "line localization response was truncated"
+                if truncated
+                else "missing text_lines",
+                "raw_response": body,
+            }, duration_ms
+        if truncated:
+            return {
+                "status": "truncated_response",
+                "error": "line localization response was truncated",
+                "text_lines": parsed["text_lines"],
+                "raw_response": body,
+            }, duration_ms
+        return {"text_lines": parsed["text_lines"]}, duration_ms
+
+    def release(self) -> None:
+        return None
+
+
 class OllamaRegionalReader:
     """Independent minimal OCR request for one source-resolution crop."""
 
@@ -280,6 +367,29 @@ def validate_regions(regions: Any) -> tuple[list[dict[str, Any]], list[dict[str,
     return accepted, rejected
 
 
+def validate_line_regions(regions: Any) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+    """Validate line boxes in a coarse crop's qwen_0_1000 coordinate frame."""
+    accepted: list[dict[str, Any]] = []
+    rejected: list[dict[str, Any]] = []
+    if not isinstance(regions, list):
+        return [], [{"index": None, "bbox": regions, "reason": "text_lines must be an array"}]
+    for index, region in enumerate(regions):
+        bbox = region.get("bbox_2d") if isinstance(region, dict) else None
+        valid, reason = _validate_bbox(bbox)
+        if valid:
+            accepted.append(
+                {"index": index, "bbox_2d": [float(item) for item in cast(list[Any], bbox)]}
+            )
+        else:
+            rejected.append({"index": index, "bbox": bbox, "reason": reason})
+    return accepted, rejected
+
+
+def order_line_regions(regions: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Order lines top-to-bottom, then left-to-right, independent of model order."""
+    return sorted(regions, key=lambda region: (region["bbox_2d"][1], region["bbox_2d"][0]))
+
+
 def _iou(first: list[float], second: list[float]) -> float:
     left, top = max(first[0], second[0]), max(first[1], second[1])
     right, bottom = min(first[2], second[2]), min(first[3], second[3])
@@ -354,6 +464,52 @@ def _source_crop(
     }
 
 
+def _line_source_crop(
+    source: Image.Image,
+    coarse_crop: dict[str, Any],
+    bbox: list[float],
+    output_path: Path,
+    line_id: str,
+) -> dict[str, Any]:
+    """Map a line bbox from its coarse crop frame directly into source pixels."""
+    normalized = qwen_bbox_to_normalized(cast(tuple[float, float, float, float], tuple(bbox)))
+    padded = pad_normalized_bounds(normalized, proportion=PADDING_PROPORTION)
+    coarse_bounds = coarse_crop["source_bbox"]
+    coarse_width = coarse_crop["width"]
+    coarse_height = coarse_crop["height"]
+    left = round(coarse_bounds["left"] + padded[0] * coarse_width)
+    top = round(coarse_bounds["top"] + padded[1] * coarse_height)
+    right = round(coarse_bounds["left"] + padded[2] * coarse_width)
+    bottom = round(coarse_bounds["top"] + padded[3] * coarse_height)
+    left = max(coarse_bounds["left"], min(source.width, left))
+    top = max(coarse_bounds["top"], min(source.height, top))
+    right = max(coarse_bounds["left"], min(source.width, right))
+    bottom = max(coarse_bounds["top"], min(source.height, bottom))
+    if right <= left or bottom <= top:
+        raise ValueError("line localization produced an empty source region")
+    bounds = RegionBounds(left, top, right, bottom)
+    crop = source.crop((left, top, right, bottom)).convert("RGB")
+    crop_path = output_path.parent / "transcription-reread" / f"{line_id}.png"
+    crop_path.parent.mkdir(parents=True, exist_ok=True)
+    crop.save(crop_path, format="PNG")
+    return {
+        "path": str(crop_path),
+        "width": crop.width,
+        "height": crop.height,
+        "source_bbox": asdict(bounds),
+        "source_coordinate_space": "source",
+        "relative_to": "coarse_region_crop",
+        "padding": {"proportion": PADDING_PROPORTION, "normalized_bbox": list(padded)},
+        "mapping": {
+            "from": "coarse_crop_qwen_0_1000",
+            "to": "source",
+            "coarse_crop_dimensions": {"width": coarse_width, "height": coarse_height},
+            "coarse_source_bbox": coarse_bounds,
+        },
+        "image": crop,
+    }
+
+
 def _controls(model: str) -> dict[str, Any]:
     return {
         "model": model,
@@ -369,12 +525,99 @@ def _controls(model: str) -> dict[str, Any]:
     }
 
 
+def _localization_controls(
+    model: str, prompt: str, schema: dict[str, Any], budget: int
+) -> dict[str, Any]:
+    return {
+        "model": model,
+        "think": False,
+        "num_predict": budget,
+        "stream": False,
+        "keep_alive": 0,
+        "temperature": "unspecified (Ollama/model default)",
+        "top_p": "unspecified (Ollama/model default)",
+        "seed": "unspecified (Ollama/model default)",
+        "prompt": prompt,
+        "schema": schema,
+    }
+
+
+def _read_crop(
+    crop_image: Image.Image,
+    requested: int,
+    reader_factory: Callable[[Callable[[dict[str, Any]], None]], RegionalReader] | None,
+) -> tuple[list[dict[str, Any]], str]:
+    reads: list[dict[str, Any]] = []
+    reader_raw: Any = None
+
+    def observe_reader(response: dict[str, Any]) -> None:
+        nonlocal reader_raw
+        reader_raw = response
+
+    reader = (
+        reader_factory(observe_reader)
+        if reader_factory
+        else OllamaRegionalReader(observer=observe_reader)
+    )
+    try:
+        for run in range(1, requested + 1):
+            reader_raw = None
+            started = time.perf_counter()
+            try:
+                result, duration_ms = reader.read(crop_image)
+                raw = reader_raw if reader_raw is not None else result.get("raw_response")
+                if result.get("status") == "invalid_response" or not isinstance(
+                    result.get("text"), str
+                ):
+                    reads.append(
+                        {
+                            "run": run,
+                            "status": "invalid_response",
+                            "text": None,
+                            "raw_response": raw,
+                            "error": result.get("error", "missing text"),
+                            "duration_ms": round(duration_ms, 3),
+                        }
+                    )
+                else:
+                    reads.append(
+                        {
+                            "run": run,
+                            "status": "ok",
+                            "text": result["text"],
+                            "raw_response": raw,
+                            "duration_ms": round(duration_ms, 3),
+                        }
+                    )
+            except (RuntimeError, ValueError) as error:
+                reads.append(
+                    {
+                        "run": run,
+                        "status": "failed",
+                        "text": None,
+                        "raw_response": reader_raw,
+                        "error": str(error),
+                        "duration_ms": round((time.perf_counter() - started) * 1000, 3),
+                    }
+                )
+    finally:
+        reader.release()
+    return reads, getattr(reader, "model", DEFAULT_QWEN_MODEL)
+
+
+def _reading_summary(reads: list[dict[str, Any]]) -> dict[str, Any]:
+    distinct = list(dict.fromkeys(item["text"] for item in reads if item["status"] == "ok"))
+    return {"distinct_readings": distinct, "stable": len(distinct) == 1 and len(distinct) > 0}
+
+
 def run_reread_experiment(
     image_path: Path,
     *,
     runs: int | None = None,
     output_path: Path = DEFAULT_OUTPUT,
     localizer_factory: Callable[[Callable[[dict[str, Any]], None]], TextRegionLocalizer]
+    | None = None,
+    line_localizer_factory: Callable[[Callable[[dict[str, Any]], None]], TextLineLocalizer]
     | None = None,
     reader_factory: Callable[[Callable[[dict[str, Any]], None]], RegionalReader] | None = None,
 ) -> dict[str, Any]:
@@ -455,63 +698,73 @@ def run_reread_experiment(
         region_id = f"region-{number:02d}"
         crop_info = _source_crop(source, prepared, located["bbox_2d"], output_path, region_id)
         crop_image = cast(Image.Image, crop_info.pop("image"))
-        reads: list[dict[str, Any]] = []
-        reader_raw: Any = None
+        reads, reader_model = _read_crop(crop_image, requested, reader_factory)
+        summary = _reading_summary(reads)
+        raw_line_localization: Any = None
 
-        def observe_reader(response: dict[str, Any]) -> None:
-            nonlocal reader_raw
-            reader_raw = response
+        def observe_line_localization(response: dict[str, Any]) -> None:
+            nonlocal raw_line_localization
+            raw_line_localization = response
 
-        reader = (
-            reader_factory(observe_reader)
-            if reader_factory
-            else OllamaRegionalReader(observer=observe_reader)
+        line_localizer = (
+            line_localizer_factory(observe_line_localization)
+            if line_localizer_factory
+            else OllamaTextLineLocalizer(observer=observe_line_localization)
         )
         try:
-            for run in range(1, requested + 1):
-                reader_raw = None
-                started = time.perf_counter()
-                try:
-                    result, duration_ms = reader.read(crop_image)
-                    raw = reader_raw if reader_raw is not None else result.get("raw_response")
-                    if result.get("status") == "invalid_response" or not isinstance(
-                        result.get("text"), str
-                    ):
-                        reads.append(
-                            {
-                                "run": run,
-                                "status": "invalid_response",
-                                "text": None,
-                                "raw_response": raw,
-                                "error": result.get("error", "missing text"),
-                                "duration_ms": round(duration_ms, 3),
-                            }
-                        )
-                    else:
-                        reads.append(
-                            {
-                                "run": run,
-                                "status": "ok",
-                                "text": result["text"],
-                                "raw_response": raw,
-                                "duration_ms": round(duration_ms, 3),
-                            }
-                        )
-                except (RuntimeError, ValueError) as error:
-                    reads.append(
-                        {
-                            "run": run,
-                            "status": "failed",
-                            "text": None,
-                            "raw_response": reader_raw,
-                            "error": str(error),
-                            "duration_ms": round((time.perf_counter() - started) * 1000, 3),
-                        }
-                    )
+            try:
+                line_localization, line_localization_ms = line_localizer.localize(crop_image)
+            except (RuntimeError, ValueError) as error:
+                line_localization, line_localization_ms = (
+                    {"status": "failed", "error": str(error)},
+                    0.0,
+                )
         finally:
-            reader.release()
-            crop_image.close()
-        distinct = list(dict.fromkeys(item["text"] for item in reads if item["status"] == "ok"))
+            line_localizer.release()
+        line_regions, line_rejected = validate_line_regions(line_localization.get("text_lines"))
+        line_regions = order_line_regions(line_regions)
+        line_status = line_localization.get("status")
+        if line_status is None:
+            line_status = (
+                "ok"
+                if isinstance(line_localization.get("text_lines"), list)
+                else "invalid_response"
+            )
+        line_artifact: dict[str, Any] = {
+            "status": line_status,
+            "error": line_localization.get("error"),
+            "raw_response": raw_line_localization or line_localization.get("raw_response"),
+            "duration_ms": round(line_localization_ms, 3),
+            "model_coordinate_space": "qwen_0_1000",
+            "relative_to": "coarse_region_crop",
+            "rejected_regions": line_rejected,
+            "request_controls": _localization_controls(
+                getattr(line_localizer, "model", DEFAULT_QWEN_MODEL),
+                LINE_LOCALIZATION_PROMPT,
+                LINE_LOCALIZATION_SCHEMA,
+                LINE_LOCALIZATION_NUM_PREDICT,
+            ),
+            "regions": [],
+        }
+        for line_number, line_region in enumerate(line_regions, start=1):
+            line_id = f"{region_id}-line-{line_number:02d}"
+            line_crop_info = _line_source_crop(
+                source, crop_info, line_region["bbox_2d"], output_path, line_id
+            )
+            line_crop_image = cast(Image.Image, line_crop_info.pop("image"))
+            line_reads, _line_reader_model = _read_crop(line_crop_image, requested, reader_factory)
+            line_crop_image.close()
+            line_artifact["regions"].append(
+                {
+                    "line_id": line_id,
+                    "model_bbox": line_region["bbox_2d"],
+                    "model_coordinate_space": "qwen_0_1000",
+                    **line_crop_info,
+                    "reads": line_reads,
+                    **_reading_summary(line_reads),
+                }
+            )
+        crop_image.close()
         artifact["regions"].append(
             {
                 "region_id": region_id,
@@ -519,11 +772,12 @@ def run_reread_experiment(
                 "model_coordinate_space": "qwen_0_1000",
                 **crop_info,
                 "reads": reads,
-                "distinct_readings": distinct,
-                "stable": len(distinct) == 1 and len(distinct) > 0,
+                "coarse_reads": reads,
+                **summary,
+                "line_localization": line_artifact,
             }
         )
-        artifact["request_controls"] = _controls(getattr(reader, "model", DEFAULT_QWEN_MODEL))
+        artifact["request_controls"] = _controls(reader_model)
     output_path.parent.mkdir(parents=True, exist_ok=True)
     output_path.write_text(json.dumps(artifact, indent=2) + "\n", encoding="utf-8")
     return artifact
@@ -557,6 +811,8 @@ def format_reread_result(result: dict[str, Any]) -> str:
                 f"\n{region['region_id']}:",
                 f"  source bbox: {region['source_bbox']}",
                 f"  crop: {region['path']}",
+                f"  coarse distinct readings: {len(region['distinct_readings'])}",
+                f"  lines: {len(region['line_localization']['regions'])}",
             ]
         )
         lines.extend(
@@ -569,4 +825,22 @@ def format_reread_result(result: dict[str, Any]) -> str:
                 f"  stable: {str(region['stable']).lower()}",
             ]
         )
+        for line in region["line_localization"]["regions"]:
+            lines.extend(
+                [
+                    f"\n  {line['line_id']}:",
+                    f"    source bbox: {line['source_bbox']}",
+                    f"    crop: {line['path']}",
+                ]
+            )
+            lines.extend(
+                f"    Run {read['run']}: {read.get('text') or read.get('error')} [{read['status']}]"
+                for read in line["reads"]
+            )
+            lines.extend(
+                [
+                    f"    distinct readings: {len(line['distinct_readings'])}",
+                    f"    stable: {str(line['stable']).lower()}",
+                ]
+            )
     return "\n".join(lines)
