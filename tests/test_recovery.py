@@ -12,6 +12,7 @@ from sibyl.recovery import (
     map_prepared_bounds,
     prepare_vlm_image,
     recover_page,
+    write_markdown_recovery,
 )
 
 
@@ -137,13 +138,35 @@ def test_qwen_page_interpretation_shape_from_thinking_is_normalized(monkeypatch:
         ),
     )
     result, _ = OllamaPageInterpreter(model="test").interpret(Image.new("L", (1536, 2048)))
-    assert [region["text"] for region in result["regions"][:6]] == expected_text
-    assert result["regions"][6]["kind"] == "figure"
-    assert result["regions"][6]["bbox_2d"] == [505, 1468, 656, 1790]
-    assert result["regions"][6]["text"] == expected_description
+    assert result["page_text"] == expected_text
+    assert len(result["regions"]) == 1
+    assert result["regions"][0]["kind"] == "figure"
+    assert result["regions"][0]["bbox_2d"] == [505, 1468, 656, 1790]
+    assert result["regions"][0]["text"] == expected_description
     assert map_prepared_bounds(
         (505, 1468, 656, 1790), (1536, 2048), (3900, 5200)
     ) == RegionBounds(1282, 3727, 1666, 4545)
+
+
+def test_qwen_prompt_requests_page_text_and_drawings_not_spatial_text(monkeypatch: Any) -> None:
+    requests: list[dict[str, Any]] = []
+
+    def urlopen(request: Any, timeout: int) -> _Response:
+        requests.append(json.loads(request.data))
+        return _ollama_response(
+            {
+                "content": json.dumps(
+                    {"page_interpretation": {"text": [], "drawing": []}}
+                )
+            }
+        )
+
+    monkeypatch.setattr("urllib.request.urlopen", urlopen)
+    OllamaPageInterpreter(model="test").interpret(Image.new("L", (20, 20)))
+    request = requests[0]
+    assert "regions" not in request["format"]["properties"]
+    assert "page-level text" in request["messages"][0]["content"]
+    assert "spatial text regions" in request["messages"][0]["content"]
 
 
 def test_qwen_invalid_structured_output_is_explicit(monkeypatch: Any) -> None:
@@ -188,6 +211,63 @@ class FigureInterpreter:
 class FailingRecognizer:
     def recognize(self, image: Image.Image) -> tuple[str, float]:
         raise AssertionError("figure regions must not be sent to TrOCR")
+
+
+class PageLevelTextInterpreter:
+    model = "fake-qwen"
+
+    def interpret(self, image: Image.Image) -> tuple[dict[str, Any], float]:
+        return {
+            "page_interpretation": {"text": ["Xylem", "N -> H -> H"]},
+            "page_text": ["Xylem", "N -> H -> H"],
+            "regions": [
+                {
+                    "order": index,
+                    "kind": "figure",
+                    "text": f"diagram {index + 1}",
+                    "bbox_2d": list(bbox),
+                }
+                for index, bbox in enumerate(
+                    (
+                        (499, 1468, 581, 1788),
+                        (817, 1509, 911, 1788),
+                        (1055, 1481, 1143, 1788),
+                    )
+                )
+            ],
+        }, 1.0
+
+    def release(self) -> None:
+        pass
+
+
+def test_page_level_text_does_not_trigger_trocr_or_fake_spatial_regions(
+    tmp_path: Path,
+) -> None:
+    image_path = tmp_path / "page.png"
+    Image.new("RGB", (3900, 5200), "white").save(image_path)
+    page = recover_page(image_path, PageLevelTextInterpreter(), FailingRecognizer())
+    assert page.page_text == ["Xylem", "N -> H -> H"]
+    assert len(page.regions) == 3
+    assert all(region.kind == "figure" for region in page.regions)
+    assert page.runtime["benchmark"]["spatial_text_regions"] == 0
+    assert page.runtime["benchmark"]["drawing_regions"] == 3
+    assert page.runtime["benchmark"]["trocr_attempts"] == 0
+    assert page.runtime["benchmark"]["trocr_timings"] == []
+    assert page.runtime["disagreements"] == []
+    assert page.runtime["recognizer"]["status"] == "not_applicable"
+    assert [Path(region.source["crop"]).name for region in page.regions] == [
+        "figure-01.png",
+        "figure-02.png",
+        "figure-03.png",
+    ]
+    assert [region.bounds for region in page.regions] == [
+        RegionBounds(1267, 3727, 1475, 4540),
+        RegionBounds(2074, 3831, 2313, 4540),
+        RegionBounds(2679, 3760, 2902, 4540),
+    ]
+    markdown = write_markdown_recovery(page).read_text()
+    assert all(f"assets/figure-{index:02d}.png" in markdown for index in range(1, 4))
 
 
 def test_figure_crops_use_mapped_original_coordinates_and_record_benchmark(tmp_path: Path) -> None:

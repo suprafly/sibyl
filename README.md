@@ -19,12 +19,12 @@ just run recover samples/Grafting-101-page-003.png
 ```
 
 The source image remains authoritative. Qwen receives an in-memory grayscale
-derivative (capped at 1536×2048), identifies regions and page structure, and
-TrOCR recognizes each crop from the original image. Qwen is requested with
-`keep_alive=0` before TrOCR loads, so the command does not assume both models
-fit in the approximately 8 GB GPU simultaneously. Structured Qwen output is
-required; invalid or prose-only responses fail visibly rather than being parsed
-as if they were reliable coordinates.
+derivative (capped at 1536×2048), returns ordered page-level text and spatial
+drawing boxes, and Sibyl crops drawings from the original image. Page-level
+text does not trigger TrOCR; the spatial-text recognition boundary remains
+available only for a future explicitly supported Qwen response. Structured
+Qwen output is required; invalid or prose-only responses fail visibly rather
+than being parsed as if they were reliable coordinates.
 
 ## Development
 

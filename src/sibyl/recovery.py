@@ -66,6 +66,7 @@ class RecoveredPage:
     interpretation: dict[str, Any]
     regions: list[RecoveredRegion]
     runtime: dict[str, Any]
+    page_text: list[str] = field(default_factory=list)
 
 
 class PageInterpreter(Protocol):
@@ -138,6 +139,7 @@ class OllamaPageInterpreter:
         )
         page_text = interpretation.get("text") if isinstance(interpretation, dict) else None
         page_diagrams = interpretation.get("diagram") if isinstance(interpretation, dict) else None
+        page_drawings = interpretation.get("drawing") if isinstance(interpretation, dict) else None
         if (
             regions is None
             and figures is None
@@ -145,6 +147,7 @@ class OllamaPageInterpreter:
             and nested_figures is None
             and page_text is None
             and page_diagrams is None
+            and page_drawings is None
         ):
             return False
         if regions is not None:
@@ -198,6 +201,17 @@ class OllamaPageInterpreter:
             )
             if not valid_diagrams:
                 return False
+        if page_drawings is not None:
+            valid_drawings = isinstance(page_drawings, list) and all(
+                isinstance(item, dict)
+                and isinstance(item.get("bbox"), list)
+                and len(item["bbox"]) == 4
+                and all(isinstance(value, (int, float)) for value in item["bbox"])
+                and isinstance(item.get("description"), str)
+                for item in page_drawings
+            )
+            if not valid_drawings:
+                return False
         return True
 
     @staticmethod
@@ -219,17 +233,12 @@ class OllamaPageInterpreter:
             return result
         interpretation = result.get("page_interpretation", {})
         page_text = interpretation.get("text", [])
-        page_diagrams = interpretation.get("diagram", [])
-        if page_text or page_diagrams:
+        page_drawings = interpretation.get("drawing")
+        if page_drawings is None:
+            page_drawings = interpretation.get("diagram", [])
+        if page_text or page_drawings:
             prepared_width, prepared_height = prepared_size
             result["regions"] = [
-                {
-                    "order": index,
-                    "kind": "text",
-                    "text": text,
-                    "bbox_2d": [0, 0, prepared_width, prepared_height],
-                }
-                for index, text in enumerate(page_text)
             ] + [
                 {
                     "order": len(page_text) + index,
@@ -242,8 +251,9 @@ class OllamaPageInterpreter:
                         round(diagram["bbox"][3] * prepared_height),
                     ],
                 }
-                for index, diagram in enumerate(page_diagrams)
+                for index, diagram in enumerate(page_drawings)
             ]
+            result["page_text"] = page_text
             return result
         text_regions = interpretation.get("text_regions", [])
         diagrams = interpretation.get("diagrams", [])
@@ -292,53 +302,38 @@ class OllamaPageInterpreter:
         schema = {
             "type": "object",
             "properties": {
-                "page_interpretation": {"type": "object"},
-                "regions": {
-                    "type": "array",
-                    "items": {
-                        "type": "object",
-                        "properties": {
-                            "kind": {"type": "string"},
-                            "order": {"type": "integer"},
-                            "left": {"type": "number"},
-                            "top": {"type": "number"},
-                            "right": {"type": "number"},
-                            "bottom": {"type": "number"},
-                            "text": {"type": "string"},
-                            "bbox_2d": {
-                                "type": "array",
-                                "items": {"type": "number"},
-                                "minItems": 4,
-                                "maxItems": 4,
+                "page_interpretation": {
+                    "type": "object",
+                    "properties": {
+                        "text": {"type": "array", "items": {"type": "string"}},
+                        "drawing": {
+                            "type": "array",
+                            "items": {
+                                "type": "object",
+                                "properties": {
+                                    "bbox": {
+                                        "type": "array",
+                                        "items": {"type": "number"},
+                                        "minItems": 4,
+                                        "maxItems": 4,
+                                    },
+                                    "description": {"type": "string"},
+                                },
+                                "required": ["bbox", "description"],
                             },
                         },
-                        "required": ["kind", "order"],
                     },
-                },
-                "figures": {
-                    "type": "array",
-                    "items": {
-                        "type": "object",
-                        "properties": {
-                            "label": {"type": "string"},
-                            "bbox_2d": {
-                                "type": "array",
-                                "items": {"type": "number"},
-                                "minItems": 4,
-                                "maxItems": 4,
-                            },
-                        },
-                        "required": ["label", "bbox_2d"],
-                    },
+                    "required": ["text", "drawing"],
                 },
             },
-            "required": [],
+            "required": ["page_interpretation"],
         }
         prompt = (
             "Interpret this handwritten page. Return only JSON matching the schema. "
-            "Coordinates are normalized 0..1 relative to the supplied image. Identify "
-            "each text region in reading order, preserve uncertain wording, and include "
-            "drawings or diagrams in page_interpretation without inventing text."
+            "Return ordered page-level text exactly as observed; do not enumerate "
+            "spatial text regions or invent text coordinates. Coordinates for drawings "
+            "are normalized 0..1 relative to the supplied image. Include zero or more "
+            "drawings in page_interpretation without inventing text."
         )
         payload = {
             "model": self.model,
@@ -477,7 +472,13 @@ def recover_page(
     if interpretation.get("status") == "failure":
         failure_error = interpretation.get("error", "Qwen interpretation failed")
         raise RuntimeError(f"{failure_error}: {json.dumps(interpretation.get('raw_response'))}")
-    if recognizer is None:
+    raw_regions = sorted(
+        interpretation["regions"], key=lambda item: int(item.get("order", 0))
+    )
+    spatial_text_raw = [
+        raw for raw in raw_regions if str(raw.get("kind", "text")) != "figure"
+    ]
+    if spatial_text_raw and recognizer is None:
         recognizer, load_ms, cuda, device, gpu = TrocrRecognizer.from_local_cache()
         recognizer_metadata = {
             "model_load_ms": load_ms,
@@ -485,13 +486,19 @@ def recover_page(
             "device": device,
             "gpu": gpu,
         }
-    recognizer_metadata = recognizer_metadata or {}
+    elif not spatial_text_raw:
+        recognizer_metadata = recognizer_metadata or {
+            "status": "not_applicable",
+            "reason": "no spatial text regions",
+        }
+    else:
+        recognizer_metadata = recognizer_metadata or {}
     regions: list[RecoveredRegion] = []
     artifact_directory = image_path.parent / f"{image_path.stem}.sibyl" / "assets"
     figure_count = 0
     disagreements: list[dict[str, Any]] = []
     trocr_timings: list[dict[str, Any]] = []
-    for raw in sorted(interpretation["regions"], key=lambda item: int(item.get("order", 0))):
+    for raw in raw_regions:
         bounds, prepared_bounds = _bounds(raw, source.size, prepared.prepared_dimensions)
         region_image = source.crop((bounds.left, bounds.top, bounds.right, bounds.bottom)).convert(
             "RGB"
@@ -507,6 +514,8 @@ def recover_page(
             inference_ms = 0.0
             elapsed_ms = 0.0
         else:
+            if recognizer is None:
+                raise RuntimeError("TrOCR recognizer is unavailable for a spatial text region")
             started = time.perf_counter()
             text, inference_ms = recognizer.recognize(region_image)
             elapsed_ms = (time.perf_counter() - started) * 1000
@@ -544,6 +553,8 @@ def recover_page(
         )
     response_metadata = getattr(interpreter, "response_metadata", {})
     total_ms = (time.perf_counter() - recovery_started) * 1000
+    drawing_count = sum(region.kind == "figure" for region in regions)
+    spatial_text_count = len(regions) - drawing_count
     runtime = {
         "vlm_model": getattr(interpreter, "model", None),
         "vlm_ms": round(qwen_ms, 3),
@@ -566,6 +577,9 @@ def recover_page(
             "prompt_tokens": response_metadata.get("prompt_tokens"),
             "output_tokens": response_metadata.get("output_tokens"),
             "region_count": len(regions),
+            "spatial_text_regions": spatial_text_count,
+            "drawing_regions": drawing_count,
+            "trocr_attempts": len(trocr_timings),
             "trocr_timings": trocr_timings,
             "total_recovery_ms": round(total_ms, 3),
         },
@@ -577,6 +591,7 @@ def recover_page(
         interpretation=interpretation.get("page_interpretation", {}),
         regions=regions,
         runtime=runtime,
+        page_text=interpretation.get("page_text", []),
     )
 
 
@@ -596,7 +611,7 @@ def write_recovery_json(page: RecoveredPage) -> Path:
 
 def format_text_recovery(page: RecoveredPage) -> str:
     """Project only recovered text, preserving model spelling and order."""
-    lines: list[str] = []
+    lines: list[str] = list(page.page_text)
     for region in sorted(page.regions, key=lambda item: item.order):
         if region.kind == "figure" or not region.text:
             continue
@@ -614,7 +629,7 @@ def write_markdown_recovery(page: RecoveredPage) -> Path:
     assets_directory = output_directory / "assets"
     output_directory.mkdir(parents=True, exist_ok=True)
     write_recovery_json(page)
-    markdown_lines: list[str] = []
+    markdown_lines: list[str] = list(page.page_text)
     figure_count = 0
     for region in sorted(page.regions, key=lambda item: item.order):
         if region.kind == "figure":
