@@ -213,7 +213,49 @@ def test_drawing_localizer_accepts_thinking_json(monkeypatch: Any) -> None:
         lambda request, timeout: _ollama_response({"content": "", "thinking": json.dumps(payload)}),
     )
     result, _ = OllamaDrawingLocalizer(model="test").localize(Image.new("L", (20, 20)))
-    assert result == payload
+    assert result == {"drawings": [{"bbox_2d": [0.0, 0.0, 1.0, 1.0]}]}
+
+
+def test_drawing_localizer_normalizes_established_bbox_alias(monkeypatch: Any) -> None:
+    payload = {
+        "drawings": [{"bbox": [0.2, 0.3, 0.7, 0.8], "description": "existing fixture shape"}]
+    }
+    monkeypatch.setattr(
+        "urllib.request.urlopen",
+        lambda request, timeout: _ollama_response({"content": json.dumps(payload)}),
+    )
+    result, _ = OllamaDrawingLocalizer(model="test").localize(Image.new("L", (20, 20)))
+    assert result == {
+        "drawings": [{"bbox_2d": [0.2, 0.3, 0.7, 0.8], "description": "existing fixture shape"}]
+    }
+
+
+def test_drawing_localizer_reports_valid_json_with_unsupported_entry(monkeypatch: Any) -> None:
+    payload = {"drawings": [{"label": "not a supported drawing record"}]}
+    monkeypatch.setattr(
+        "urllib.request.urlopen",
+        lambda request, timeout: _ollama_response({"content": json.dumps(payload)}),
+    )
+    result, _ = OllamaDrawingLocalizer(model="test").localize(Image.new("L", (20, 20)))
+    assert result["status"] == "failure"
+    assert "valid drawing localization JSON" in result["error"]
+    assert "drawing entry 0" in result["error"]
+
+
+def test_drawing_localizer_distinguishes_missing_and_malformed_json(monkeypatch: Any) -> None:
+    responses = iter(
+        (
+            _ollama_response({"content": json.dumps({})}),
+            _ollama_response({"content": "not json"}),
+        )
+    )
+    monkeypatch.setattr("urllib.request.urlopen", lambda request, timeout: next(responses))
+    image = Image.new("L", (20, 20))
+    missing = OllamaDrawingLocalizer(model="test").localize(image)[0]
+    malformed = OllamaDrawingLocalizer(model="test").localize(image)[0]
+    assert "valid drawing localization JSON" in missing["error"]
+    assert "top-level drawings" in missing["error"]
+    assert "no valid drawing localization JSON" in malformed["error"]
 
 
 def test_drawing_padding_is_proportional_and_clamped() -> None:

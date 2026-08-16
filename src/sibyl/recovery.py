@@ -389,24 +389,44 @@ class OllamaDrawingLocalizer:
         self.response_metadata: dict[str, Any] = {}
 
     @staticmethod
-    def _valid_result(result: Any) -> bool:
-        if not isinstance(result, dict) or not isinstance(result.get("drawings"), list):
-            return False
-        for drawing in result["drawings"]:
+    def _normalize_result(result: Any) -> tuple[dict[str, Any] | None, str | None]:
+        if not isinstance(result, dict):
+            return None, "expected a JSON object"
+        drawings = result.get("drawings")
+        if not isinstance(drawings, list):
+            return None, "expected top-level drawings to be an array"
+        normalized: list[dict[str, Any]] = []
+        for index, drawing in enumerate(drawings):
             if not isinstance(drawing, dict):
-                return False
-            bbox = drawing.get("bbox_2d")
+                return None, f"drawing entry {index} has unsupported shape: expected an object"
+            bbox_key = "bbox_2d" if "bbox_2d" in drawing else "bbox"
+            bbox = drawing.get(bbox_key)
             if not (
                 isinstance(bbox, list)
                 and len(bbox) == 4
-                and all(isinstance(value, (int, float)) and 0 <= value <= 1 for value in bbox)
+                and all(
+                    isinstance(value, (int, float))
+                    and not isinstance(value, bool)
+                    and 0 <= value <= 1
+                    for value in bbox
+                )
                 and bbox[2] > bbox[0]
                 and bbox[3] > bbox[1]
             ):
-                return False
-            if "description" in drawing and not isinstance(drawing["description"], str):
-                return False
-        return True
+                return None, (
+                    f"drawing entry {index} has unsupported shape: expected normalized "
+                    "bbox_2d or bbox [x1, y1, x2, y2]"
+                )
+            description = drawing.get("description")
+            if description is not None and not isinstance(description, str):
+                return None, f"drawing entry {index} has unsupported description type"
+            normalized_drawing: dict[str, Any] = {
+                "bbox_2d": [float(value) for value in bbox],
+            }
+            if description is not None:
+                normalized_drawing["description"] = description
+            normalized.append(normalized_drawing)
+        return {"drawings": normalized}, None
 
     @classmethod
     def _structured_message(
@@ -423,10 +443,10 @@ class OllamaDrawingLocalizer:
             except json.JSONDecodeError:
                 continue
             saw_json = True
-            if cls._valid_result(result):
-                return cast(dict[str, Any], result), saw_json, None
-            if isinstance(result, dict):
-                unsupported_shape = ", ".join(sorted(result)) or "object"
+            normalized, reason = cls._normalize_result(result)
+            if normalized is not None:
+                return normalized, saw_json, None
+            unsupported_shape = reason or "unsupported JSON value"
         return None, saw_json, unsupported_shape
 
     def localize(self, image: Image.Image) -> tuple[dict[str, Any], float]:
@@ -506,8 +526,8 @@ class OllamaDrawingLocalizer:
         if result is None:
             if saw_json:
                 structured_error = (
-                    "Qwen returned valid JSON but unsupported drawing localization schema: "
-                    f"{unsupported_shape or 'unknown'}"
+                    "Qwen returned valid drawing localization JSON but "
+                    f"unsupported structure: {unsupported_shape or 'unknown'}"
                 )
             else:
                 structured_error = (
