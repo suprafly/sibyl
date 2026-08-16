@@ -90,7 +90,21 @@ def test_localizer_has_dedicated_controls_and_minimal_request(monkeypatch: Any) 
 
         def read(self) -> bytes:
             return json.dumps(
-                {"message": {"content": '{"text_regions": [{"bbox_2d": [1, 2, 3, 4]}]}'}},
+                {
+                    "message": {
+                        "content": json.dumps(
+                            {
+                                "text_regions": [
+                                    {"bbox_2d": [1, 2, 3, 4]},
+                                    {"bbox_2d": [10, 20, 30, 40]},
+                                    {"bbox_2d": [100, 200, 300, 400]},
+                                    {"bbox_2d": [450, 500, 600, 700]},
+                                    {"bbox_2d": [750, 800, 900, 950]},
+                                ]
+                            }
+                        )
+                    }
+                },
             ).encode()
 
     def urlopen(request: Any, timeout: int) -> Response:
@@ -102,8 +116,8 @@ def test_localizer_has_dedicated_controls_and_minimal_request(monkeypatch: Any) 
     localizer = OllamaTextRegionLocalizer(model="test", base_url="http://test")
     result, _duration = localizer.localize(Image.new("RGB", (4, 4)))
     payload = json.loads(captured["request"].data)
-    assert result == {"text_regions": [{"bbox_2d": [1, 2, 3, 4]}]}
-    assert payload["options"]["num_predict"] == LOCALIZATION_NUM_PREDICT == 128
+    assert len(result["text_regions"]) == 5
+    assert payload["options"]["num_predict"] == LOCALIZATION_NUM_PREDICT == 512
     assert payload["think"] is False
     assert payload["stream"] is False
     assert payload["keep_alive"] == 0

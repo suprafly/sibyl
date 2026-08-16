@@ -29,7 +29,7 @@ from sibyl.transform import (
 
 DEFAULT_RUNS = 5
 DEFAULT_OUTPUT = Path(".sibyl/experiments/transcription-reread.json")
-LOCALIZATION_NUM_PREDICT = 128
+LOCALIZATION_NUM_PREDICT = 512
 REGIONAL_NUM_PREDICT = 256
 LOCALIZATION_PROMPT = (
     "Identify handwritten text regions in this image. Return only the requested JSON structure: "
