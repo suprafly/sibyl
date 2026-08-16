@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import base64
 import json
+import math
 import os
 import time
 import urllib.error
@@ -28,19 +29,30 @@ from sibyl.transform import (
 
 DEFAULT_RUNS = 5
 DEFAULT_OUTPUT = Path(".sibyl/experiments/transcription-reread.json")
+LOCALIZATION_NUM_PREDICT = 128
+REGIONAL_NUM_PREDICT = 256
 LOCALIZATION_PROMPT = (
-    "Locate handwritten textual regions on this page. Return only JSON with "
-    "text_regions and bbox_2d boxes in Qwen's 0 to 1000 coordinate space. "
-    "Distinguish handwriting from graphical marks where possible."
+    "Identify handwritten text regions in this image. Return only the requested JSON structure: "
+    "text_regions containing bbox_2d with exactly four numeric values [x1, y1, x2, y2] in "
+    "Qwen's 0..1000 coordinate space. Use no prose, OCR, reasoning, commentary, or extra values."
 )
 LOCALIZATION_SCHEMA = {
     "type": "object",
+    "additionalProperties": False,
     "properties": {
         "text_regions": {
             "type": "array",
             "items": {
                 "type": "object",
-                "properties": {"bbox_2d": {"type": "array", "items": {"type": "number"}}},
+                "additionalProperties": False,
+                "properties": {
+                    "bbox_2d": {
+                        "type": "array",
+                        "items": {"type": "number"},
+                        "minItems": 4,
+                        "maxItems": 4,
+                    }
+                },
                 "required": ["bbox_2d"],
             },
         }
@@ -89,6 +101,7 @@ def _query_ollama(
     prompt: str,
     schema: dict[str, Any],
     image: Image.Image,
+    num_predict: int,
     observer: Callable[[dict[str, Any]], None] | None,
 ) -> tuple[dict[str, Any], float]:
     payload = {
@@ -96,7 +109,7 @@ def _query_ollama(
         "stream": False,
         "think": False,
         "format": schema,
-        "options": {"num_predict": 256},
+        "options": {"num_predict": num_predict},
         "keep_alive": 0,
         "messages": [{"role": "user", "content": prompt, "images": [_image_data(image)]}],
     }
@@ -155,13 +168,24 @@ class OllamaTextRegionLocalizer:
             prompt=LOCALIZATION_PROMPT,
             schema=LOCALIZATION_SCHEMA,
             image=image,
+            num_predict=LOCALIZATION_NUM_PREDICT,
             observer=self._observer,
         )
         parsed = _message_json(body)
+        truncated = body.get("done_reason") == "length"
         if not isinstance(parsed, dict) or not isinstance(parsed.get("text_regions"), list):
             return {
-                "status": "invalid_response",
-                "error": "missing text_regions",
+                "status": "truncated_response" if truncated else "invalid_response",
+                "error": (
+                    "localization response was truncated" if truncated else "missing text_regions"
+                ),
+                "raw_response": body,
+            }, duration_ms
+        if truncated:
+            return {
+                "status": "truncated_response",
+                "error": "localization response was truncated",
+                "text_regions": parsed["text_regions"],
                 "raw_response": body,
             }, duration_ms
         return {"text_regions": parsed["text_regions"]}, duration_ms
@@ -192,6 +216,7 @@ class OllamaRegionalReader:
             prompt=REGIONAL_PROMPT,
             schema=REGIONAL_SCHEMA,
             image=image,
+            num_predict=REGIONAL_NUM_PREDICT,
             observer=self._observer,
         )
         parsed = _message_json(body)
@@ -225,7 +250,10 @@ def requested_runs(value: int | None = None) -> int:
 def _validate_bbox(value: Any) -> tuple[bool, str | None]:
     if not isinstance(value, list) or len(value) != 4:
         return False, "bbox must be an array of four coordinates"
-    if not all(isinstance(item, (int, float)) and not isinstance(item, bool) for item in value):
+    if not all(
+        isinstance(item, (int, float)) and not isinstance(item, bool) and math.isfinite(float(item))
+        for item in value
+    ):
         return False, "bbox coordinates must be numeric"
     if not all(0 <= float(item) <= 1000 for item in value):
         return False, "bbox coordinates must be within qwen_0_1000"
@@ -382,6 +410,11 @@ def run_reread_experiment(
     accepted, duplicate_rejections = deduplicate_regions(accepted)
     rejected.extend(duplicate_rejections)
     accepted.sort(key=lambda item: item["index"])
+    localization_status = localization.get("status")
+    if localization_status is None:
+        localization_status = (
+            "ok" if isinstance(localization.get("text_regions"), list) else "invalid_response"
+        )
     artifact: dict[str, Any] = {
         "experiment": "transcription_reread",
         "source": str(image_path),
@@ -395,13 +428,24 @@ def run_reread_experiment(
             "prepared_image_hash": _prepared_hash(prepared),
         },
         "localization": {
-            "status": "ok"
-            if isinstance(localization.get("text_regions"), list)
-            else "invalid_response",
+            "status": localization_status,
+            "error": localization.get("error"),
             "raw_response": raw_localization or localization.get("raw_response"),
             "duration_ms": round(localization_ms, 3),
             "model_coordinate_space": "qwen_0_1000",
             "rejected_regions": rejected,
+            "request_controls": {
+                "model": getattr(localizer, "model", DEFAULT_QWEN_MODEL),
+                "think": False,
+                "stream": False,
+                "keep_alive": 0,
+                "num_predict": LOCALIZATION_NUM_PREDICT,
+                "temperature": "unspecified (Ollama/model default)",
+                "top_p": "unspecified (Ollama/model default)",
+                "seed": "unspecified (Ollama/model default)",
+                "prompt": LOCALIZATION_PROMPT,
+                "schema": LOCALIZATION_SCHEMA,
+            },
         },
         "regions": [],
         "runs_requested": requested,

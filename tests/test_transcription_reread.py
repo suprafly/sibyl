@@ -1,13 +1,17 @@
+import json
+import urllib.request
 from collections.abc import Callable
 from pathlib import Path
-from typing import Any, ClassVar
+from typing import Any, ClassVar, cast
 
 from PIL import Image
 
 from sibyl.experiments.transcription_reread import (
+    LOCALIZATION_NUM_PREDICT,
     LOCALIZATION_SCHEMA,
     REGIONAL_PROMPT,
     REGIONAL_SCHEMA,
+    OllamaTextRegionLocalizer,
     deduplicate_regions,
     run_reread_experiment,
     validate_regions,
@@ -67,10 +71,90 @@ def test_bbox_validation_rejects_malformed_range_inversion_and_zero_area() -> No
             {"bbox_2d": [-1, 2, 3, 4]},
             {"bbox_2d": [4, 2, 3, 4]},
             {"bbox_2d": [1, 2, 1, 4]},
+            {"bbox_2d": [1, 2, 3, float("inf")]},
         ]
     )
     assert [item["bbox_2d"] for item in accepted] == [[1.0, 2.0, 3.0, 4.0]]
-    assert len(rejected) == 4
+    assert len(rejected) == 5
+
+
+def test_localizer_has_dedicated_controls_and_minimal_request(monkeypatch: Any) -> None:
+    captured: dict[str, Any] = {}
+
+    class Response:
+        def __enter__(self) -> "Response":
+            return self
+
+        def __exit__(self, *_args: Any) -> None:
+            return None
+
+        def read(self) -> bytes:
+            return json.dumps(
+                {"message": {"content": '{"text_regions": [{"bbox_2d": [1, 2, 3, 4]}]}'}},
+            ).encode()
+
+    def urlopen(request: Any, timeout: int) -> Response:
+        captured["request"] = request
+        captured["timeout"] = timeout
+        return Response()
+
+    monkeypatch.setattr(urllib.request, "urlopen", urlopen)
+    localizer = OllamaTextRegionLocalizer(model="test", base_url="http://test")
+    result, _duration = localizer.localize(Image.new("RGB", (4, 4)))
+    payload = json.loads(captured["request"].data)
+    assert result == {"text_regions": [{"bbox_2d": [1, 2, 3, 4]}]}
+    assert payload["options"]["num_predict"] == LOCALIZATION_NUM_PREDICT == 128
+    assert payload["think"] is False
+    assert payload["stream"] is False
+    assert payload["keep_alive"] == 0
+    assert payload["format"] == LOCALIZATION_SCHEMA
+    assert captured["timeout"] == 300
+
+
+def test_truncated_localization_is_preserved_and_classified(monkeypatch: Any) -> None:
+    body = {
+        "done_reason": "length",
+        "eval_count": 256,
+        "message": {
+            "content": json.dumps(
+                {"text_regions": [{"bbox_2d": [99, 102, 289, 154, 1000, 1000, 0, 0]}]}
+            )
+        },
+    }
+
+    class Response:
+        def __enter__(self) -> "Response":
+            return self
+
+        def __exit__(self, *_args: Any) -> None:
+            return None
+
+        def read(self) -> bytes:
+            return json.dumps(body).encode()
+
+    monkeypatch.setattr(
+        urllib.request,
+        "urlopen",
+        lambda _request, timeout: Response(),
+    )
+    result, _duration = OllamaTextRegionLocalizer(model="test", base_url="http://test").localize(
+        Image.new("RGB", (4, 4))
+    )
+    assert result["status"] == "truncated_response"
+    assert result["text_regions"][0]["bbox_2d"][-1] == 0
+    assert result["raw_response"] == body
+
+
+def test_localization_schema_requires_exactly_four_values() -> None:
+    properties = cast(dict[str, Any], LOCALIZATION_SCHEMA["properties"])
+    text_regions = cast(dict[str, Any], properties["text_regions"])
+    items = cast(dict[str, Any], text_regions["items"])
+    item_properties = cast(dict[str, Any], items["properties"])
+    bbox_schema = cast(
+        dict[str, Any],
+        item_properties["bbox_2d"],
+    )
+    assert bbox_schema["minItems"] == bbox_schema["maxItems"] == 4
 
 
 def test_deduplication_is_deterministic_for_duplicates_and_overlap() -> None:
@@ -156,4 +240,4 @@ def test_schemas_and_prompt_are_minimal_and_isolated() -> None:
     }
     assert "bbox" not in REGIONAL_SCHEMA["properties"]
     assert "candidate" not in REGIONAL_PROMPT.lower()
-    assert "text_regions" in LOCALIZATION_SCHEMA["properties"]
+    assert "text_regions" in cast(dict[str, Any], LOCALIZATION_SCHEMA["properties"])
