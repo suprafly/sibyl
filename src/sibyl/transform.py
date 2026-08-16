@@ -16,7 +16,8 @@ from typing import Any, Protocol, cast
 
 from PIL import Image, UnidentifiedImageError
 
-VLM_MAX_DIMENSIONS = (1536, 2048)
+DRAWING_MAX_DIMENSIONS = (1536, 2048)
+DEFAULT_PAGE_MAX_DIMENSION = 1536
 DEFAULT_OLLAMA_URL = "http://127.0.0.1:11434"
 DEFAULT_QWEN_MODEL = "qwen3-vl:8b"
 
@@ -80,18 +81,42 @@ def _bounded_dimensions(size: tuple[int, int], maximum: tuple[int, int]) -> tupl
 
 
 def prepare_vlm_image(source: Image.Image) -> tuple[Image.Image, tuple[int, int]]:
-    """Create the deterministic, in-memory grayscale derivative for the VLM."""
+    """Create the fixed-size grayscale derivative used by drawing localization."""
     image = source.convert("L")
-    dimensions = _bounded_dimensions(image.size, VLM_MAX_DIMENSIONS)
+    dimensions = _bounded_dimensions(image.size, DRAWING_MAX_DIMENSIONS)
     if dimensions != image.size:
         image = image.resize(dimensions, Image.Resampling.LANCZOS)
     return image, dimensions
 
 
-def prepare_vlm_image_with_metadata(source: Image.Image) -> PreparedVlmImage:
-    """Create the deterministic inference representation and measure preparation."""
+def _page_max_dimension() -> int:
+    configured = os.environ.get("SIBYL_PAGE_MAX_DIMENSION")
+    if configured is None:
+        return DEFAULT_PAGE_MAX_DIMENSION
+    try:
+        maximum = int(configured)
+    except ValueError as error:
+        raise ValueError("SIBYL_PAGE_MAX_DIMENSION must be a positive integer") from error
+    if maximum <= 0:
+        raise ValueError("SIBYL_PAGE_MAX_DIMENSION must be a positive integer")
+    return maximum
+
+
+def prepare_page_image(source: Image.Image) -> tuple[Image.Image, tuple[int, int]]:
+    """Create the page grayscale derivative with an experiment-controlled width maximum."""
+    image = source.convert("L")
+    maximum = _page_max_dimension()
+    height_maximum = round(maximum * image.height / image.width)
+    dimensions = _bounded_dimensions(image.size, (maximum, height_maximum))
+    if dimensions != image.size:
+        image = image.resize(dimensions, Image.Resampling.LANCZOS)
+    return image, dimensions
+
+
+def prepare_page_image_with_metadata(source: Image.Image) -> PreparedVlmImage:
+    """Create the page inference representation and measure preparation."""
     started = time.perf_counter()
-    image, dimensions = prepare_vlm_image(source)
+    image, dimensions = prepare_page_image(source)
     scale = min(
         dimensions[0] / source.width,
         dimensions[1] / source.height,
@@ -528,10 +553,11 @@ def transform_page(
     except (UnidentifiedImageError, OSError) as error:
         raise ValueError(f"Unable to read image: {image_path}") from error
 
-    prepared = prepare_vlm_image_with_metadata(source)
+    page_prepared = prepare_page_image_with_metadata(source)
+    drawing_image, drawing_dimensions = prepare_vlm_image(source)
     supplied_interpreter = interpreter is not None
     interpreter = interpreter or OllamaPageInterpreter()
-    interpretation, page_transform_ms = interpreter.interpret(prepared.image)
+    interpretation, page_transform_ms = interpreter.interpret(page_prepared.image)
     interpreter.release()
     if interpretation.get("status") == "failure":
         failure_error = interpretation.get("error", "Qwen interpretation failed")
@@ -549,7 +575,7 @@ def transform_page(
     ]
     if drawing_localizer is not None:
         try:
-            localized, drawing_localization_ms = drawing_localizer.localize(prepared.image)
+            localized, drawing_localization_ms = drawing_localizer.localize(drawing_image)
             drawing_localizer.release()
         except (RuntimeError, ValueError) as error:
             localized = {
@@ -620,7 +646,7 @@ def transform_page(
             else pad_normalized_bounds(normalized_bounds)
         )
         prepared_bounds = _normalized_to_prepared_bounds(
-            padded_normalized, prepared.prepared_dimensions
+            padded_normalized, drawing_dimensions
         )
         bounds = map_prepared_bounds(
             (
@@ -629,7 +655,7 @@ def transform_page(
                 prepared_bounds.right,
                 prepared_bounds.bottom,
             ),
-            prepared.prepared_dimensions,
+            drawing_dimensions,
             source.size,
         )
         artifact_directory.mkdir(parents=True, exist_ok=True)
@@ -672,8 +698,8 @@ def transform_page(
         "vlm_model": getattr(interpreter, "model", None),
         "vlm_ms": round(page_transform_ms, 3),
         "vlm_dimensions": {
-            "width": prepared.prepared_dimensions[0],
-            "height": prepared.prepared_dimensions[1],
+            "width": page_prepared.prepared_dimensions[0],
+            "height": page_prepared.prepared_dimensions[1],
         },
         "page_transform": {
             "status": "success",
@@ -692,12 +718,20 @@ def transform_page(
             "drawing_localization_model": getattr(drawing_localizer, "model", None),
             "runtime": "ollama",
             "preparation_dimensions": {
-                "width": prepared.prepared_dimensions[0],
-                "height": prepared.prepared_dimensions[1],
+                "width": page_prepared.prepared_dimensions[0],
+                "height": page_prepared.prepared_dimensions[1],
+            },
+            "page_preparation_dimensions": {
+                "width": page_prepared.prepared_dimensions[0],
+                "height": page_prepared.prepared_dimensions[1],
+            },
+            "drawing_preparation_dimensions": {
+                "width": drawing_dimensions[0],
+                "height": drawing_dimensions[1],
             },
             "source_dimensions": {"width": source.width, "height": source.height},
-            "scale": prepared.scale,
-            "preparation_ms": round(prepared.preparation_ms, 3),
+            "scale": page_prepared.scale,
+            "preparation_ms": round(page_prepared.preparation_ms, 3),
             "qwen_ms": round(page_transform_ms, 3),
             "page_transform_ms": round(page_transform_ms, 3),
             "drawing_localization_ms": round(drawing_localization_ms, 3),

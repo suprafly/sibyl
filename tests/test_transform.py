@@ -14,6 +14,7 @@ from sibyl.transform import (
     format_transform,
     map_prepared_bounds,
     pad_normalized_bounds,
+    prepare_page_image,
     prepare_vlm_image,
     qwen_bbox_to_normalized,
     transform_page,
@@ -41,6 +42,37 @@ def test_vlm_preparation_is_bounded_and_preserves_source() -> None:
     assert dimensions == (1536, 2048)
     assert prepared.mode == "L"
     assert source.getpixel((0, 0)) == (1, 2, 3)
+
+
+@pytest.mark.parametrize(
+    "configured,expected",
+    [(None, (1536, 2048)), ("2048", (2048, 2731)), ("2560", (2560, 3413))],
+)
+def test_page_preparation_resolution_is_explicit_and_aspect_preserving(
+    monkeypatch: pytest.MonkeyPatch,
+    configured: str | None,
+    expected: tuple[int, int],
+) -> None:
+    if configured is None:
+        monkeypatch.delenv("SIBYL_PAGE_MAX_DIMENSION", raising=False)
+    else:
+        monkeypatch.setenv("SIBYL_PAGE_MAX_DIMENSION", configured)
+    prepared, dimensions = prepare_page_image(Image.new("RGB", (3900, 5200), "white"))
+    assert dimensions == expected
+    assert dimensions[0] / dimensions[1] == pytest.approx(3900 / 5200, abs=1e-4)
+    assert prepared.size == expected
+
+
+def test_page_resolution_does_not_change_drawing_preparation(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    source = Image.new("RGB", (3900, 5200), "white")
+    baseline, baseline_dimensions = prepare_vlm_image(source)
+    monkeypatch.setenv("SIBYL_PAGE_MAX_DIMENSION", "2560")
+    experimental, experimental_dimensions = prepare_vlm_image(source)
+    assert experimental_dimensions == baseline_dimensions == (1536, 2048)
+    assert experimental.size == baseline.size
+    assert experimental.tobytes() == baseline.tobytes()
 
 
 def test_prepared_coordinate_mapping_is_deterministic() -> None:
@@ -222,6 +254,18 @@ def test_page_text_and_one_complete_figure_are_projected_without_text_assets(
     artifact = json.loads((tmp_path / "page.sibyl" / "transform.json").read_text())
     assert artifact["page_text"] == page.page_text
     assert artifact["regions"][0]["source"]["provenance"] == ["drawing_localization"]
+
+
+def test_experimental_page_resolution_is_recorded_without_changing_drawing_resolution(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    image_path = tmp_path / "page.png"
+    Image.new("RGB", (3900, 5200), "white").save(image_path)
+    monkeypatch.setenv("SIBYL_PAGE_MAX_DIMENSION", "2560")
+    page = transform_page(image_path, PageInterpreter(), drawing_localizer=DrawingLocalizer())
+    benchmark = page.runtime["benchmark"]
+    assert benchmark["page_preparation_dimensions"] == {"width": 2560, "height": 3413}
+    assert benchmark["drawing_preparation_dimensions"] == {"width": 1536, "height": 2048}
 
 
 def test_page_text_projection_is_qwen_text_without_ocr_layers(tmp_path: Path) -> None:
