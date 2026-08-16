@@ -1,0 +1,16 @@
+version: 1
+
+system:
+  name: sibyl
+
+applications:
+  api:
+    type: phoenix
+
+  mobile:
+    type: flutter
+
+bindings:
+  - from: mobile
+    to: api
+    via: graphql
