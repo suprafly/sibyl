@@ -11,7 +11,7 @@ from sibyl.experiments.transcription_reread import (
     DEFAULT_OUTPUT as REREAD_DEFAULT_OUTPUT,
 )
 from sibyl.experiments.transcription_reread import (
-    DEFAULT_REREADS,
+    DEFAULT_RUNS,
     format_reread_result,
     run_reread_experiment,
 )
@@ -58,23 +58,21 @@ def build_parser() -> argparse.ArgumentParser:
         ),
     )
     reread = experiment_commands.add_parser(
-        "transcription-reread", help="reread page regions with disagreeing observations"
+        "transcription-reread", help="measure repeated Qwen reads of localized text regions"
     )
     reread.add_argument("image", type=Path, help="page image")
-    reread.add_argument("--runs", type=int, help="number of page transcription runs")
     reread.add_argument(
-        "--rereads",
+        "--runs",
         type=int,
-        default=DEFAULT_REREADS,
-        help=f"targeted rereads per disagreement (default: {DEFAULT_REREADS})",
+        default=DEFAULT_RUNS,
+        help=f"independent regional reads per crop (default: {DEFAULT_RUNS})",
     )
     reread.add_argument(
         "--output",
         type=Path,
         default=None,
         help=(
-            "experimental JSON output path "
-            "(default: .sibyl/experiments/transcription-reread.json)"
+            "experimental JSON output path (default: .sibyl/experiments/transcription-reread.json)"
         ),
     )
     run_parser = commands.add_parser("run", help="transform one handwritten page")
@@ -113,7 +111,6 @@ def main(argv: Sequence[str] | None = None) -> int:
             reread_result = run_reread_experiment(
                 arguments.image,
                 runs=arguments.runs,
-                rereads=arguments.rereads,
                 output_path=arguments.output or REREAD_DEFAULT_OUTPUT,
             )
         except (FileNotFoundError, RuntimeError, ValueError) as error:

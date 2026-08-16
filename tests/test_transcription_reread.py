@@ -2,41 +2,17 @@ from collections.abc import Callable
 from pathlib import Path
 from typing import Any, ClassVar
 
-import pytest
 from PIL import Image
 
-import sibyl.experiments.transcription_variance as variance_module
 from sibyl.experiments.transcription_reread import (
     LOCALIZATION_SCHEMA,
-    TARGETED_PROMPT,
-    TARGETED_SCHEMA,
-    _disagreements,
-    format_reread_result,
+    REGIONAL_PROMPT,
+    REGIONAL_SCHEMA,
+    deduplicate_regions,
     run_reread_experiment,
+    validate_regions,
 )
-from sibyl.experiments.transcription_variance import VarianceResult, VarianceRun
-from sibyl.transform import PreparedVlmImage, prepare_page_image_with_metadata
-
-
-class FakePageInterpreter:
-    model = "qwen3-vl:8b"
-
-    def __init__(self, observer: Callable[[dict[str, Any]], None]) -> None:
-        self.response_metadata: dict[str, Any] = {}
-        self.observer = observer
-        self.images: list[Image.Image] = []
-
-    def interpret(self, image: Image.Image) -> tuple[dict[str, Any], float]:
-        self.images.append(image)
-        raw = {"message": {"content": "page raw"}}
-        self.observer(raw)
-        lines = [["stable", "scion"], ["stable", "scler"], ["stable", "stem"]][
-            len(self.images) - 1
-        ]
-        return {"page_interpretation": {"text": lines}}, 1.0
-
-    def release(self) -> None:
-        return None
+from sibyl.transform import map_prepared_bounds
 
 
 class FakeLocalizer:
@@ -48,265 +24,136 @@ class FakeLocalizer:
 
     def localize(self, image: Image.Image) -> tuple[dict[str, Any], float]:
         self.images.append(image)
-        self.observer({"message": {"content": "localization raw"}})
+        raw = {"message": {"content": "localization raw"}}
+        self.observer(raw)
         return {
-            "text_regions": [
-                {"order": 0, "bbox_2d": [100, 100, 300, 300]},
-                {"order": 1, "bbox_2d": [100, 400, 300, 600]},
-            ]
+            "text_regions": [{"bbox_2d": [100, 100, 300, 300]}, {"bbox_2d": [100, 100, 300, 300]}]
         }, 2.0
 
     def release(self) -> None:
         return None
 
 
-class FakeRereader:
+class FakeReader:
     model = "qwen3-vl:8b"
-    instances: ClassVar[list["FakeRereader"]] = []
+    instances: ClassVar[list["FakeReader"]] = []
 
     def __init__(self, observer: Callable[[dict[str, Any]], None]) -> None:
         self.observer = observer
-        self.calls: list[Image.Image] = []
-        self.__class__.instances.append(self)
+        self.images: list[Image.Image] = []
+        self.instances.append(self)
 
-    def reread(self, image: Image.Image) -> tuple[dict[str, Any], float]:
-        self.calls.append(image)
-        raw = {"message": {"content": "reread raw"}}
+    def read(self, image: Image.Image) -> tuple[dict[str, Any], float]:
+        self.images.append(image)
+        raw = {"message": {"content": f"raw-{len(self.images)}"}}
         self.observer(raw)
-        return {"text": f"reread-{len(self.calls)}"}, 3.0
+        return {"text": "scion" if len(self.images) < 3 else "stem"}, 3.0
 
     def release(self) -> None:
         return None
 
 
-def _page(tmp_path: Path) -> Path:
+def page(tmp_path: Path) -> Path:
     path = tmp_path / "page.png"
     Image.new("RGB", (100, 100), (12, 34, 56)).save(path)
     return path
 
 
-def _page_factory(created: list[FakePageInterpreter]) -> Callable[..., FakePageInterpreter]:
-    def factory(observer: Callable[[dict[str, Any]], None]) -> FakePageInterpreter:
-        interpreter = FakePageInterpreter(observer)
-        created.append(interpreter)
-        return interpreter
+def test_bbox_validation_rejects_malformed_range_inversion_and_zero_area() -> None:
+    accepted, rejected = validate_regions(
+        [
+            {"bbox_2d": [1, 2, 3, 4]},
+            {"bbox_2d": [1, 2, 3]},
+            {"bbox_2d": [-1, 2, 3, 4]},
+            {"bbox_2d": [4, 2, 3, 4]},
+            {"bbox_2d": [1, 2, 1, 4]},
+        ]
+    )
+    assert [item["bbox_2d"] for item in accepted] == [[1.0, 2.0, 3.0, 4.0]]
+    assert len(rejected) == 4
 
-    return factory
 
-
-def _variance(*observations: list[str]) -> VarianceResult:
-    runs = [
-        VarianceRun(
-            run=index,
-            status="ok",
-            text="\n".join(lines),
-            raw_response={},
-            duration_ms=1.0,
-            lines=lines,
-        )
-        for index, lines in enumerate(observations, start=1)
+def test_deduplication_is_deterministic_for_duplicates_and_overlap() -> None:
+    regions = [
+        {"index": 0, "bbox_2d": [0.0, 0.0, 100.0, 100.0]},
+        {"index": 1, "bbox_2d": [0.0, 0.0, 100.0, 100.0]},
+        {"index": 2, "bbox_2d": [10.0, 10.0, 90.0, 90.0]},
+        {"index": 3, "bbox_2d": [500.0, 500.0, 600.0, 600.0]},
     ]
-    return VarianceResult(
-        experiment="transcription_variance",
-        runs_requested=len(runs),
-        runs_completed=len(runs),
-        source="page.png",
-        page_focus="full",
-        model="qwen3-vl:8b",
-        prepared_dimensions={"width": 100, "height": 100},
-        prepared_image_hash="hash",
-        request_controls={},
-        runs=runs,
-        comparison={},
-        failure_summary={"ok": len(runs), "invalid_response": 0, "failed": 0},
-    )
+    kept, rejected = deduplicate_regions(regions)
+    assert [item["index"] for item in kept] == [0, 3]
+    assert [item["index"] for item in rejected] == [1, 2]
 
 
-@pytest.mark.parametrize(
-    ("observations", "other"),
-    [
-        (["same text"], ["same text"]),
-        (["same   text", "next"], ["same text", "next"]),
-        (["- transports mineral nutrients"], ["• transports mineral nutrients"]),
-        (
-            ["transports mineral nutrients", "and water from root to", "scion"],
-            ["transports mineral nutrients and water from root to", "scion"],
-        ),
-    ],
-)
-def test_formatting_and_wrapping_variation_is_not_a_disagreement(
-    observations: list[str], other: list[str]
-) -> None:
-    disagreements, _normalized = _disagreements(_variance(observations, other))
-    assert disagreements == []
+def test_mapping_is_prepared_to_source_and_preserves_provenance() -> None:
+    assert map_prepared_bounds((10, 20, 30, 40), (100, 200), (1000, 2000)).left == 100
 
 
-def test_word_substitution_is_one_candidate_with_context() -> None:
-    disagreements, _normalized = _disagreements(
-        _variance(
-            ["Xylem", "transports mineral nutrients and water from root to scion"],
-            ["Xylem", "transports mineral nutrients and water from root to scler"],
-            ["Xylem", "transports mineral nutrients and water from root to stem"],
-        )
-    )
-
-    assert len(disagreements) == 1
-    candidate = disagreements[0]
-    assert candidate["context_before"].endswith("water from root to")
-    assert candidate["context_after"] == ""
-    assert candidate["candidates"] == ["scion", "scler", "stem"]
-    assert [item["reading"] for item in candidate["observations"]] == [
-        "scion",
-        "scler",
-        "stem",
-    ]
-
-
-def test_multiple_candidate_spans_remain_separate() -> None:
-    disagreements, _normalized = _disagreements(
-        _variance(
-            ["Splice grafting is useful for scion plants"],
-            ["Sapia grafting is useful for scler plants"],
-            ["Splay grafting is useful for stem plants"],
-            ["Sapling grafting is useful for scion plants"],
-        )
-    )
-
-    assert len(disagreements) == 2
-    assert disagreements[0]["candidates"] == ["Splice", "Sapia", "Splay", "Sapling"]
-    assert disagreements[1]["candidates"] == ["scion", "scler", "stem"]
-    assert disagreements[0]["context_after"].startswith("grafting is useful")
-    assert disagreements[1]["context_before"].endswith("for")
-
-
-def test_disagreement_localizes_once_crops_source_and_rereads(
-    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
-) -> None:
-    def fail_drawing_localizer(*args: Any, **kwargs: Any) -> None:
-        raise AssertionError("drawing localization must not run")
-
-    monkeypatch.setattr("sibyl.transform.OllamaDrawingLocalizer", fail_drawing_localizer)
-    original_prepare = prepare_page_image_with_metadata
-    preparations = 0
-
-    def prepare(source: Image.Image) -> PreparedVlmImage:
-        nonlocal preparations
-        preparations += 1
-        return original_prepare(source)
-
-    monkeypatch.setattr(variance_module, "prepare_page_image_with_metadata", prepare)
-    page_created: list[FakePageInterpreter] = []
-    localizer_created: list[FakeLocalizer] = []
-    FakeRereader.instances = []
+def test_region_first_reuses_one_prepared_image_and_exact_rgb_crop(tmp_path: Path) -> None:
+    FakeReader.instances = []
+    localizers: list[FakeLocalizer] = []
 
     def localizer_factory(observer: Callable[[dict[str, Any]], None]) -> FakeLocalizer:
-        localizer = FakeLocalizer(observer)
-        localizer_created.append(localizer)
-        return localizer
+        value = FakeLocalizer(observer)
+        localizers.append(value)
+        return value
 
     result = run_reread_experiment(
-        _page(tmp_path),
-        runs=3,
-        rereads=2,
-        output_path=tmp_path / "transcription-reread.json",
+        page(tmp_path),
+        runs=5,
+        output_path=tmp_path / "result.json",
         localizer_factory=localizer_factory,
-        rereader_factory=FakeRereader,
-        interpreter_factory=_page_factory(page_created),
+        reader_factory=FakeReader,
     )
-
-    assert preparations == 1
-    assert len(page_created) == 1
-    assert page_created[0].images[0] is page_created[0].images[1] is page_created[0].images[2]
-    assert len(localizer_created) == 1
-    assert len(localizer_created[0].images) == 1
-    assert result["prepared_image_hash"]
-    assert len(result["disagreements"]) == 1
-    disagreement = result["disagreements"][0]
-    assert disagreement["page_candidates"] == ["scion", "scler", "stem"]
-    assert disagreement["bbox"]["space"] == "qwen_0_1000"
-    assert disagreement["crop"]["coordinate_space"] == "source"
-    assert disagreement["crop"]["width"] == 22
-    assert disagreement["crop"]["height"] == 22
-    crop_path = Path(disagreement["crop"]["path"])
-    assert crop_path.exists()
-    with Image.open(crop_path) as crop:
+    assert len(localizers) == 1
+    assert len(localizers[0].images) == 1
+    assert len(result["regions"]) == 1
+    region = result["regions"][0]
+    assert region["model_coordinate_space"] == "qwen_0_1000"
+    assert region["source_coordinate_space"] == "source"
+    assert region["source_bbox"] == {"left": 9, "top": 9, "right": 31, "bottom": 31}
+    assert region["width"] == region["height"] == 22
+    assert Path(region["path"]).name == "region-01.png"
+    with Image.open(region["path"]) as crop:
         assert crop.mode == "RGB"
         assert crop.getpixel((0, 0)) == (12, 34, 56)
-    assert len(FakeRereader.instances) == 1
-    assert len(FakeRereader.instances[0].calls) == 2
-    assert disagreement["rereads"][0]["raw_response"] == {
-        "message": {"content": "reread raw"}
-    }
-    assert result["localization"]["status"] == "success"
-    assert "scler" not in TARGETED_PROMPT
+    assert len(FakeReader.instances[0].images) == 5
+    assert len({id(image) for image in FakeReader.instances[0].images}) == 1
+    assert [read["status"] for read in region["reads"]] == ["ok"] * 5
+    assert region["distinct_readings"] == ["scion", "stem"]
+    assert region["stable"] is False
+    assert region["reads"][0]["raw_response"] == {"message": {"content": "raw-1"}}
 
 
-def test_stable_page_has_no_disagreement_and_no_localization(tmp_path: Path) -> None:
-    class StablePage(FakePageInterpreter):
-        def interpret(self, image: Image.Image) -> tuple[dict[str, Any], float]:
+def test_invalid_and_failed_reads_are_not_empty_successes(tmp_path: Path) -> None:
+    class BadReader(FakeReader):
+        def read(self, image: Image.Image) -> tuple[dict[str, Any], float]:
             self.images.append(image)
-            return {"page_interpretation": {"text": ["stable"]}}, 1.0
-
-    localizer_called = False
-
-    def localizer_factory(observer: Callable[[dict[str, Any]], None]) -> FakeLocalizer:
-        nonlocal localizer_called
-        localizer_called = True
-        return FakeLocalizer(observer)
-
-    def page_factory(observer: Callable[[dict[str, Any]], None]) -> StablePage:
-        return StablePage(observer)
+            self.observer({"raw": len(self.images)})
+            if len(self.images) == 1:
+                return {"status": "invalid_response", "error": "bad json"}, 1.0
+            raise RuntimeError("request failed")
 
     result = run_reread_experiment(
-        _page(tmp_path),
-        runs=3,
+        page(tmp_path),
+        runs=2,
         output_path=tmp_path / "result.json",
-        localizer_factory=localizer_factory,
-        rereader_factory=FakeRereader,
-        interpreter_factory=page_factory,
+        localizer_factory=FakeLocalizer,
+        reader_factory=BadReader,
     )
-
-    assert result["disagreements"] == []
-    assert result["localization"] == {"status": "not_needed"}
-    assert localizer_called is False
-
-
-def test_unavailable_localization_preserves_candidates_without_crop(tmp_path: Path) -> None:
-    class InvalidLocalizer:
-        model = "qwen3-vl:8b"
-
-        def localize(self, image: Image.Image) -> tuple[dict[str, Any], float]:
-            return {
-                "status": "failure",
-                "error": "malformed localization",
-                "raw_response": {"partial": True},
-            }, 1.0
-
-        def release(self) -> None:
-            return None
-
-    result = run_reread_experiment(
-        _page(tmp_path),
-        runs=3,
-        output_path=tmp_path / "result.json",
-        localizer_factory=lambda observer: InvalidLocalizer(),
-        rereader_factory=FakeRereader,
-        interpreter_factory=_page_factory([]),
-    )
-
-    assert result["disagreements"][0]["page_candidates"]
-    assert "crop" not in result["disagreements"][0]
-    assert result["localization"]["status"] == "unavailable"
-    assert "targeted localization unavailable" in result["localization"]["message"]
-    assert "candidate disagreement detected" in format_reread_result(result)
+    assert [read["status"] for read in result["regions"][0]["reads"]] == [
+        "invalid_response",
+        "failed",
+    ]
+    assert result["regions"][0]["reads"][0]["text"] is None
 
 
-def test_targeted_schema_is_minimal_and_has_no_bbox_or_candidate_fields() -> None:
-    assert TARGETED_SCHEMA == {
+def test_schemas_and_prompt_are_minimal_and_isolated() -> None:
+    assert REGIONAL_SCHEMA == {
         "type": "object",
         "properties": {"text": {"type": "string"}},
         "required": ["text"],
     }
-    assert "bbox" not in TARGETED_SCHEMA["properties"]
-    assert "candidate" not in TARGETED_PROMPT.lower()
+    assert "bbox" not in REGIONAL_SCHEMA["properties"]
+    assert "candidate" not in REGIONAL_PROMPT.lower()
     assert "text_regions" in LOCALIZATION_SCHEMA["properties"]

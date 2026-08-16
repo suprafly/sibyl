@@ -1,0 +1,662 @@
+{
+  "experiment": "transcription_reread",
+  "source": "samples/Grafting-101-page-004.png",
+  "source_dimensions": {
+    "width": 3900,
+    "height": 5200
+  },
+  "page_focus": "full",
+  "prepared_dimensions": {
+    "width": 1536,
+    "height": 2048
+  },
+  "prepared_image_hash": "6688727c463c62a982521f2df3f2d7e014e2257ca0444f39f13ad8fcdc912267",
+  "page_runs_requested": 5,
+  "page_observations": {
+    "experiment": "transcription_variance",
+    "runs_requested": 5,
+    "runs_completed": 5,
+    "source": "samples/Grafting-101-page-004.png",
+    "page_focus": "full",
+    "model": "qwen3-vl:8b",
+    "prepared_dimensions": {
+      "width": 1536,
+      "height": 2048
+    },
+    "prepared_image_hash": "6688727c463c62a982521f2df3f2d7e014e2257ca0444f39f13ad8fcdc912267",
+    "request_controls": {
+      "model": "qwen3-vl:8b",
+      "think": false,
+      "num_predict": 256,
+      "stream": false,
+      "keep_alive": 0,
+      "temperature": "unspecified (Ollama/model default)",
+      "top_p": "unspecified (Ollama/model default)",
+      "seed": "unspecified (Ollama/model default)",
+      "prompt": "existing OllamaPageInterpreter page-transcription prompt",
+      "schema": "existing OllamaPageInterpreter page-transcription schema"
+    },
+    "runs": [
+      {
+        "run": 1,
+        "status": "ok",
+        "text": "Xylem\n- transports mineral nutrients\non \u2193 water from root to\nscler\nPhloem\n- transports food and nutrients\nfrom leaves to storage organs.\nSapia grafting \u2013 what we\nwill do now.\nN \u2192 H \u2192",
+        "raw_response": {
+          "model": "qwen3-vl:8b",
+          "created_at": "2026-08-16T21:59:42.758053265Z",
+          "message": {
+            "role": "assistant",
+            "content": "",
+            "thinking": "{\"page_interpretation\": { \"text\": [ \"Xylem\", \"- transports mineral nutrients\", \"on \u2193 water from root to\", \"scler\", \"Phloem\", \"- transports food and nutrients\", \"from leaves to storage organs.\", \"Sapia grafting \u2013 what we\", \"will do now.\", \"N \u2192 H \u2192\" ] }}"
+          },
+          "done": true,
+          "done_reason": "stop",
+          "total_duration": 15436773926,
+          "load_duration": 5684517088,
+          "prompt_eval_count": 3273,
+          "prompt_eval_duration": 7790088000,
+          "eval_count": 76,
+          "eval_duration": 1893865000
+        },
+        "duration_ms": 15447.747,
+        "lines": [
+          "Xylem",
+          "- transports mineral nutrients",
+          "on \u2193 water from root to",
+          "scler",
+          "Phloem",
+          "- transports food and nutrients",
+          "from leaves to storage organs.",
+          "Sapia grafting \u2013 what we",
+          "will do now.",
+          "N \u2192 H \u2192"
+        ],
+        "error": null
+      },
+      {
+        "run": 2,
+        "status": "ok",
+        "text": ". Xylem\n- transports mineral nutrients\nand water from root to\nstion\n. Phloem\n- transports food and nutrients\nfrom leaves to storage organs.\n. Grafting - what we\nwill do now.\n  ",
+        "raw_response": {
+          "model": "qwen3-vl:8b",
+          "created_at": "2026-08-16T21:59:55.907701156Z",
+          "message": {
+            "role": "assistant",
+            "content": "",
+            "thinking": "{\"page_interpretation\": {\"text\": [\". Xylem\\n- transports mineral nutrients\\nand water from root to\\nstion\\n. Phloem\\n- transports food and nutrients\\nfrom leaves to storage organs.\\n. Grafting - what we\\nwill do now.\\n  \"]} }"
+          },
+          "done": true,
+          "done_reason": "stop",
+          "total_duration": 13111105323,
+          "load_duration": 3447315283,
+          "prompt_eval_count": 3273,
+          "prompt_eval_duration": 7949021000,
+          "eval_count": 65,
+          "eval_duration": 1645286000
+        },
+        "duration_ms": 13115.381,
+        "lines": [
+          ". Xylem\n- transports mineral nutrients\nand water from root to\nstion\n. Phloem\n- transports food and nutrients\nfrom leaves to storage organs.\n. Grafting - what we\nwill do now.\n  "
+        ],
+        "error": null
+      },
+      {
+        "run": 3,
+        "status": "invalid_response",
+        "text": null,
+        "raw_response": {
+          "model": "qwen3-vl:8b",
+          "created_at": "2026-08-16T22:00:09.523147143Z",
+          "message": {
+            "role": "assistant",
+            "content": "",
+            "thinking": "{\"page_interpretation\": {\"text\": [\". Xylem\\n- transports mineral nutrients\\nand water from root to\\nScler\\n. Phloem\\n- transports food and nutrients\\nfrom leaves to storage organs.\\n. Spruce grafting - what we\\nwill do now.\\n\\n\\n\\n\\n\\n\\n\\n\\n\\n\\n\\n\\n\\n\\n\\n\\n\\n\\n\\n\\n\\n\\n\\n\\n\\n\\n\\n\\n\\n\\n\\n"
+          },
+          "done": false
+        },
+        "duration_ms": 13605.335,
+        "lines": null,
+        "error": "Ollama/Qwen returned no valid structured JSON in content or thinking"
+      },
+      {
+        "run": 4,
+        "status": "ok",
+        "text": "Xylem\n- transports mineral nutrients\non \u2193 water from root to\nShoot\n\nPhloem\n- transports food and nutrients\nfrom leaves to storage organs.\n\nSplit grafting \u2013 what we\nwill do now.\n\n",
+        "raw_response": {
+          "model": "qwen3-vl:8b",
+          "created_at": "2026-08-16T22:00:22.591691205Z",
+          "message": {
+            "role": "assistant",
+            "content": "",
+            "thinking": "{\"page_interpretation\": { \"text\": [ \"Xylem\\n- transports mineral nutrients\\non \u2193 water from root to\\nShoot\\n\\nPhloem\\n- transports food and nutrients\\nfrom leaves to storage organs.\\n\\nSplit grafting \u2013 what we\\nwill do now.\\n\\n\" ] }}"
+          },
+          "done": true,
+          "done_reason": "stop",
+          "total_duration": 13012967866,
+          "load_duration": 3388245240,
+          "prompt_eval_count": 3273,
+          "prompt_eval_duration": 7946200000,
+          "eval_count": 66,
+          "eval_duration": 1615718000
+        },
+        "duration_ms": 13014.362,
+        "lines": [
+          "Xylem\n- transports mineral nutrients\non \u2193 water from root to\nShoot\n\nPhloem\n- transports food and nutrients\nfrom leaves to storage organs.\n\nSplit grafting \u2013 what we\nwill do now.\n\n"
+        ],
+        "error": null
+      },
+      {
+        "run": 5,
+        "status": "ok",
+        "text": "\u2022 Xylem\n- transports mineral nutrients\nand water from root to\nstom\n\u2022 Phloem\n- transports food and nutrients\nfrom leaves to storage organs.\n\u2022 Simple grafting \u2013 what we\nwill do now.\n\nN \u2192 H \u2192 [drawn image of a plant stem with arrows pointing right and text \"wirdp\"]",
+        "raw_response": {
+          "model": "qwen3-vl:8b",
+          "created_at": "2026-08-16T22:00:36.137783395Z",
+          "message": {
+            "role": "assistant",
+            "content": "",
+            "thinking": "{\"page_interpretation\": { \"text\": [ \"\u2022 Xylem\\n- transports mineral nutrients\\nand water from root to\\nstom\\n\u2022 Phloem\\n- transports food and nutrients\\nfrom leaves to storage organs.\\n\u2022 Simple grafting \u2013 what we\\nwill do now.\\n\\nN \u2192 H \u2192 [drawn image of a plant stem with arrows pointing right and text \\\"wirdp\\\"]\" ] } }"
+          },
+          "done": true,
+          "done_reason": "stop",
+          "total_duration": 13512280102,
+          "load_duration": 3228162863,
+          "prompt_eval_count": 3273,
+          "prompt_eval_duration": 7967879000,
+          "eval_count": 91,
+          "eval_duration": 2253211000
+        },
+        "duration_ms": 13513.833,
+        "lines": [
+          "\u2022 Xylem\n- transports mineral nutrients\nand water from root to\nstom\n\u2022 Phloem\n- transports food and nutrients\nfrom leaves to storage organs.\n\u2022 Simple grafting \u2013 what we\nwill do now.\n\nN \u2192 H \u2192 [drawn image of a plant stem with arrows pointing right and text \"wirdp\"]"
+        ],
+        "error": null
+      }
+    ],
+    "comparison": {
+      "successful_runs": 4,
+      "transcriptions_identical": false,
+      "transcriptions_different": true,
+      "outputs": [
+        "Xylem\n- transports mineral nutrients\non \u2193 water from root to\nscler\nPhloem\n- transports food and nutrients\nfrom leaves to storage organs.\nSapia grafting \u2013 what we\nwill do now.\nN \u2192 H \u2192",
+        ". Xylem\n- transports mineral nutrients\nand water from root to\nstion\n. Phloem\n- transports food and nutrients\nfrom leaves to storage organs.\n. Grafting - what we\nwill do now.\n  ",
+        "Xylem\n- transports mineral nutrients\non \u2193 water from root to\nShoot\n\nPhloem\n- transports food and nutrients\nfrom leaves to storage organs.\n\nSplit grafting \u2013 what we\nwill do now.\n\n",
+        "\u2022 Xylem\n- transports mineral nutrients\nand water from root to\nstom\n\u2022 Phloem\n- transports food and nutrients\nfrom leaves to storage organs.\n\u2022 Simple grafting \u2013 what we\nwill do now.\n\nN \u2192 H \u2192 [drawn image of a plant stem with arrows pointing right and text \"wirdp\"]"
+      ]
+    },
+    "failure_summary": {
+      "ok": 4,
+      "invalid_response": 1,
+      "failed": 0
+    }
+  },
+  "normalized_comparison": {
+    "runs": [
+      {
+        "run": 1,
+        "tokens": [
+          "Xylem",
+          "transports",
+          "mineral",
+          "nutrients",
+          "on",
+          "\u2193",
+          "water",
+          "from",
+          "root",
+          "to",
+          "scler",
+          "Phloem",
+          "transports",
+          "food",
+          "and",
+          "nutrients",
+          "from",
+          "leaves",
+          "to",
+          "storage",
+          "organs",
+          ".",
+          "Sapia",
+          "grafting",
+          "\u2013",
+          "what",
+          "we",
+          "will",
+          "do",
+          "now",
+          ".",
+          "N",
+          "\u2192",
+          "H",
+          "\u2192"
+        ]
+      },
+      {
+        "run": 2,
+        "tokens": [
+          ".",
+          "Xylem",
+          "-",
+          "transports",
+          "mineral",
+          "nutrients",
+          "and",
+          "water",
+          "from",
+          "root",
+          "to",
+          "stion",
+          ".",
+          "Phloem",
+          "-",
+          "transports",
+          "food",
+          "and",
+          "nutrients",
+          "from",
+          "leaves",
+          "to",
+          "storage",
+          "organs",
+          ".",
+          ".",
+          "Grafting",
+          "-",
+          "what",
+          "we",
+          "will",
+          "do",
+          "now",
+          "."
+        ]
+      },
+      {
+        "run": 4,
+        "tokens": [
+          "Xylem",
+          "-",
+          "transports",
+          "mineral",
+          "nutrients",
+          "on",
+          "\u2193",
+          "water",
+          "from",
+          "root",
+          "to",
+          "Shoot",
+          "Phloem",
+          "-",
+          "transports",
+          "food",
+          "and",
+          "nutrients",
+          "from",
+          "leaves",
+          "to",
+          "storage",
+          "organs",
+          ".",
+          "Split",
+          "grafting",
+          "\u2013",
+          "what",
+          "we",
+          "will",
+          "do",
+          "now",
+          "."
+        ]
+      },
+      {
+        "run": 5,
+        "tokens": [
+          "Xylem",
+          "-",
+          "transports",
+          "mineral",
+          "nutrients",
+          "and",
+          "water",
+          "from",
+          "root",
+          "to",
+          "stom",
+          "\u2022",
+          "Phloem",
+          "-",
+          "transports",
+          "food",
+          "and",
+          "nutrients",
+          "from",
+          "leaves",
+          "to",
+          "storage",
+          "organs",
+          ".",
+          "\u2022",
+          "Simple",
+          "grafting",
+          "\u2013",
+          "what",
+          "we",
+          "will",
+          "do",
+          "now",
+          ".",
+          "N",
+          "\u2192",
+          "H",
+          "\u2192",
+          "[",
+          "drawn",
+          "image",
+          "of",
+          "a",
+          "plant",
+          "stem",
+          "with",
+          "arrows",
+          "pointing",
+          "right",
+          "and",
+          "text",
+          "\"",
+          "wirdp",
+          "\"",
+          "]"
+        ]
+      }
+    ]
+  },
+  "disagreements": [
+    {
+      "candidate_id": "candidate-01",
+      "region_id": "candidate-01",
+      "line_index": 0,
+      "line_indices": [
+        0
+      ],
+      "context_before": "",
+      "context_after": "Xylem transports mineral nutrients on \u2193 water from",
+      "candidates": [
+        "",
+        "."
+      ],
+      "page_candidates": [
+        "",
+        "."
+      ],
+      "observations": [
+        {
+          "run": 1,
+          "reading": ""
+        },
+        {
+          "run": 2,
+          "reading": "."
+        },
+        {
+          "run": 4,
+          "reading": ""
+        },
+        {
+          "run": 5,
+          "reading": ""
+        }
+      ]
+    },
+    {
+      "candidate_id": "candidate-02",
+      "region_id": "candidate-02",
+      "line_index": 1,
+      "line_indices": [
+        1
+      ],
+      "context_before": "Xylem",
+      "context_after": "transports mineral nutrients on \u2193 water from root",
+      "candidates": [
+        "",
+        "-"
+      ],
+      "page_candidates": [
+        "",
+        "-"
+      ],
+      "observations": [
+        {
+          "run": 1,
+          "reading": ""
+        },
+        {
+          "run": 2,
+          "reading": "-"
+        },
+        {
+          "run": 4,
+          "reading": "-"
+        },
+        {
+          "run": 5,
+          "reading": "-"
+        }
+      ]
+    },
+    {
+      "candidate_id": "candidate-03",
+      "region_id": "candidate-03",
+      "line_index": 2,
+      "line_indices": [
+        2
+      ],
+      "context_before": "Xylem transports mineral nutrients",
+      "context_after": "water from root to scler Phloem transports food",
+      "candidates": [
+        "on \u2193",
+        "and"
+      ],
+      "page_candidates": [
+        "on \u2193",
+        "and"
+      ],
+      "observations": [
+        {
+          "run": 1,
+          "reading": "on \u2193"
+        },
+        {
+          "run": 2,
+          "reading": "and"
+        },
+        {
+          "run": 4,
+          "reading": "on \u2193"
+        },
+        {
+          "run": 5,
+          "reading": "and"
+        }
+      ]
+    },
+    {
+      "candidate_id": "candidate-04",
+      "region_id": "candidate-04",
+      "line_index": 3,
+      "line_indices": [
+        3
+      ],
+      "context_before": "mineral nutrients on \u2193 water from root to",
+      "context_after": "Phloem transports food and nutrients from leaves to",
+      "candidates": [
+        "scler",
+        "stion.",
+        "Shoot",
+        "stom \u2022"
+      ],
+      "page_candidates": [
+        "scler",
+        "stion.",
+        "Shoot",
+        "stom \u2022"
+      ],
+      "observations": [
+        {
+          "run": 1,
+          "reading": "scler"
+        },
+        {
+          "run": 2,
+          "reading": "stion."
+        },
+        {
+          "run": 4,
+          "reading": "Shoot"
+        },
+        {
+          "run": 5,
+          "reading": "stom \u2022"
+        }
+      ]
+    },
+    {
+      "candidate_id": "candidate-05",
+      "region_id": "candidate-05",
+      "line_index": 5,
+      "line_indices": [
+        5
+      ],
+      "context_before": "on \u2193 water from root to scler Phloem",
+      "context_after": "transports food and nutrients from leaves to storage",
+      "candidates": [
+        "",
+        "-"
+      ],
+      "page_candidates": [
+        "",
+        "-"
+      ],
+      "observations": [
+        {
+          "run": 1,
+          "reading": ""
+        },
+        {
+          "run": 2,
+          "reading": "-"
+        },
+        {
+          "run": 4,
+          "reading": "-"
+        },
+        {
+          "run": 5,
+          "reading": "-"
+        }
+      ]
+    },
+    {
+      "candidate_id": "candidate-06",
+      "region_id": "candidate-06",
+      "line_index": 7,
+      "line_indices": [
+        7
+      ],
+      "context_before": "and nutrients from leaves to storage organs.",
+      "context_after": "what we will do now. N \u2192",
+      "candidates": [
+        "Sapia grafting \u2013",
+        ". Grafting -",
+        "Split grafting \u2013",
+        "\u2022 Simple grafting \u2013"
+      ],
+      "page_candidates": [
+        "Sapia grafting \u2013",
+        ". Grafting -",
+        "Split grafting \u2013",
+        "\u2022 Simple grafting \u2013"
+      ],
+      "observations": [
+        {
+          "run": 1,
+          "reading": "Sapia grafting \u2013"
+        },
+        {
+          "run": 2,
+          "reading": ". Grafting -"
+        },
+        {
+          "run": 4,
+          "reading": "Split grafting \u2013"
+        },
+        {
+          "run": 5,
+          "reading": "\u2022 Simple grafting \u2013"
+        }
+      ]
+    },
+    {
+      "candidate_id": "candidate-07",
+      "region_id": "candidate-07",
+      "line_index": 9,
+      "line_indices": [
+        9
+      ],
+      "context_before": "grafting \u2013 what we will do now.",
+      "context_after": "",
+      "candidates": [
+        "N \u2192 H \u2192",
+        "",
+        "N \u2192 H \u2192 [drawn image of a plant stem with arrows pointing right and text \" wirdp \"]"
+      ],
+      "page_candidates": [
+        "N \u2192 H \u2192",
+        "",
+        "N \u2192 H \u2192 [drawn image of a plant stem with arrows pointing right and text \" wirdp \"]"
+      ],
+      "observations": [
+        {
+          "run": 1,
+          "reading": "N \u2192 H \u2192"
+        },
+        {
+          "run": 2,
+          "reading": ""
+        },
+        {
+          "run": 4,
+          "reading": ""
+        },
+        {
+          "run": 5,
+          "reading": "N \u2192 H \u2192 [drawn image of a plant stem with arrows pointing right and text \" wirdp \"]"
+        }
+      ]
+    }
+  ],
+  "localization": {
+    "status": "unavailable",
+    "message": "candidate disagreement detected; targeted localization unavailable",
+    "error": "targeted localization returned no valid text-region boxes",
+    "raw_response": {
+      "model": "qwen3-vl:8b",
+      "created_at": "2026-08-16T22:00:53.847878325Z",
+      "message": {
+        "role": "assistant",
+        "content": "",
+        "thinking": "{\"text_regions\": [{\"bbox_2d\": [104, 107, 286, 155], \"order\": 1}, {\"bbox_2d\": [153, 165, 962, 214], \"order\": 2}, {\"bbox_2d\": [197, 217, 904, 265], \"order\": 3}, {\"bbox_2d\": [209, 275, 372, 310], \"order\": 4}, {\"bbox_2d\": [109, 341, 300, 393], \"order\": 5}, {\"bbox_2d\": [154, 402, 975, 461], \"order\": 6}, {\"bbox_2d\": [152, 465, 940, 529], \"order\": 7}, {\"bbox_2d\": [104, 565, 749, 633], \""
+      },
+      "done": true,
+      "done_reason": "length",
+      "total_duration": 17644362122,
+      "load_duration": 3344955581,
+      "prompt_eval_count": 3141,
+      "prompt_eval_duration": 7888641000,
+      "eval_count": 256,
+      "eval_duration": 6349198000
+    },
+    "duration_ms": 17646.833
+  },
+  "targeted_rereads": 3
+}
