@@ -1,0 +1,3 @@
+# Seed
+
+Implement an experimental Sibyl convergence operation that consumes preserved Qwen/TrOCR recognition evidence from `trocr-compare.json` and deterministically produces a Markdown transcription candidate plus machine-readable provenance. Add `sibyl experiment converge INPUT`, optional explicit human review YAML, region-level evidence synthesis, unresolved uncertainty preservation, figure reference preservation, focused tests, and `docs/convergence.md`. Do not modify canonical `sibyl run`, page transcription, localization, model adapters, source crops, or canonical artifacts. Do not invoke model inference. Follow the complete user-provided task prompt in the associated assembled implementation prompt.

@@ -7,6 +7,16 @@ from collections.abc import Sequence
 from pathlib import Path
 
 from sibyl import __version__
+from sibyl.experiments.convergence import (
+    DEFAULT_JSON as CONVERGENCE_DEFAULT_JSON,
+)
+from sibyl.experiments.convergence import (
+    DEFAULT_MARKDOWN as CONVERGENCE_DEFAULT_MARKDOWN,
+)
+from sibyl.experiments.convergence import (
+    format_convergence_result,
+    run_convergence,
+)
 from sibyl.experiments.transcription_reread import (
     DEFAULT_OUTPUT as REREAD_DEFAULT_OUTPUT,
 )
@@ -82,8 +92,17 @@ def build_parser() -> argparse.ArgumentParser:
     compare.add_argument(
         "--regions", help="comma-separated region IDs (default: all accepted coarse regions)"
     )
-    compare.add_argument(
-        "--output", type=Path, default=None, help="experimental JSON output path"
+    compare.add_argument("--output", type=Path, default=None, help="experimental JSON output path")
+    converge = experiment_commands.add_parser(
+        "converge", help="synthesize preserved Qwen/TrOCR evidence into a Markdown candidate"
+    )
+    converge.add_argument("input", type=Path, help="trocr-compare JSON artifact")
+    converge.add_argument("--review", type=Path, help="optional explicit human review YAML")
+    converge.add_argument(
+        "--output", type=Path, default=CONVERGENCE_DEFAULT_MARKDOWN, help="candidate Markdown path"
+    )
+    converge.add_argument(
+        "--json-output", type=Path, default=CONVERGENCE_DEFAULT_JSON, help="provenance JSON path"
     )
     reread.add_argument(
         "--output",
@@ -147,6 +166,18 @@ def main(argv: Sequence[str] | None = None) -> int:
             print(f"sibyl: error: {error}", file=__import__("sys").stderr)
             return 2
         print(format_compare_result(compare_result))
+    if arguments.command == "experiment" and arguments.experiment_name == "converge":
+        try:
+            convergence_result = run_convergence(
+                arguments.input,
+                review_path=arguments.review,
+                markdown_path=arguments.output,
+                json_path=arguments.json_output,
+            )
+        except (FileNotFoundError, RuntimeError, ValueError) as error:
+            print(f"sibyl: error: {error}", file=__import__("sys").stderr)
+            return 2
+        print(format_convergence_result(convergence_result))
     if arguments.command == "run":
         try:
             page = transform_page(arguments.image)
