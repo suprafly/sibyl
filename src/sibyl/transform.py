@@ -12,12 +12,16 @@ import urllib.request
 from dataclasses import asdict, dataclass, field
 from io import BytesIO
 from pathlib import Path
+from statistics import median
 from typing import Any, Protocol, cast
 
-from PIL import Image, UnidentifiedImageError
+from PIL import Image, ImageChops, UnidentifiedImageError
 
 DRAWING_MAX_DIMENSIONS = (1536, 2048)
+CONTENT_PAGE_MAX_DIMENSIONS = (1536, 1536)
 DEFAULT_PAGE_MAX_DIMENSION = 1536
+DEFAULT_PAGE_FOCUS = "full"
+CONTENT_PAGE_FOCUS = "content"
 DEFAULT_OLLAMA_URL = "http://127.0.0.1:11434"
 DEFAULT_QWEN_MODEL = "qwen3-vl:8b"
 
@@ -37,6 +41,7 @@ class PreparedVlmImage:
     prepared_dimensions: tuple[int, int]
     scale: float
     preparation_ms: float
+    focus: str = DEFAULT_PAGE_FOCUS
 
 
 @dataclass(frozen=True)
@@ -102,12 +107,59 @@ def _page_max_dimension() -> int:
     return maximum
 
 
+def _page_focus() -> str:
+    focus = os.environ.get("SIBYL_PAGE_FOCUS", DEFAULT_PAGE_FOCUS)
+    if focus not in {DEFAULT_PAGE_FOCUS, CONTENT_PAGE_FOCUS}:
+        raise ValueError("SIBYL_PAGE_FOCUS must be 'full' or 'content'")
+    return focus
+
+
+def _corner_background(image: Image.Image) -> tuple[int, int, int]:
+    image = image.convert("RGB")
+    patch_size = min(32, image.width, image.height)
+    corners = (
+        (0, 0, patch_size, patch_size),
+        (image.width - patch_size, 0, image.width, patch_size),
+        (0, image.height - patch_size, patch_size, image.height),
+        (
+            image.width - patch_size,
+            image.height - patch_size,
+            image.width,
+            image.height,
+        ),
+    )
+    pixels = [
+        image.getpixel((x, y))
+        for left, top, right, bottom in corners
+        for y in range(top, bottom)
+        for x in range(left, right)
+    ]
+    return cast(
+        tuple[int, int, int],
+        tuple(int(median(channel)) for channel in zip(*pixels, strict=True)),
+    )
+
+
+def _content_bounds(image: Image.Image) -> tuple[int, int, int, int]:
+    """Find non-background content without classifying or interpreting page marks."""
+    rgb_image = image.convert("RGB")
+    background = Image.new("RGB", rgb_image.size, _corner_background(rgb_image))
+    difference = ImageChops.difference(rgb_image, background)
+    foreground = difference.point(lambda value: 255 if value > 16 else 0)
+    return foreground.getbbox() or (0, 0, rgb_image.width, rgb_image.height)
+
+
 def prepare_page_image(source: Image.Image) -> tuple[Image.Image, tuple[int, int]]:
     """Create the page grayscale derivative with an experiment-controlled width maximum."""
     image = source.convert("L")
-    maximum = _page_max_dimension()
-    height_maximum = round(maximum * image.height / image.width)
-    dimensions = _bounded_dimensions(image.size, (maximum, height_maximum))
+    focus = _page_focus()
+    if focus == CONTENT_PAGE_FOCUS:
+        image = image.crop(_content_bounds(image))
+        dimensions = _bounded_dimensions(image.size, CONTENT_PAGE_MAX_DIMENSIONS)
+    else:
+        maximum = _page_max_dimension()
+        height_maximum = round(maximum * image.height / image.width)
+        dimensions = _bounded_dimensions(image.size, (maximum, height_maximum))
     if dimensions != image.size:
         image = image.resize(dimensions, Image.Resampling.LANCZOS)
     return image, dimensions
@@ -116,6 +168,7 @@ def prepare_page_image(source: Image.Image) -> tuple[Image.Image, tuple[int, int
 def prepare_page_image_with_metadata(source: Image.Image) -> PreparedVlmImage:
     """Create the page inference representation and measure preparation."""
     started = time.perf_counter()
+    focus = _page_focus()
     image, dimensions = prepare_page_image(source)
     scale = min(
         dimensions[0] / source.width,
@@ -127,6 +180,7 @@ def prepare_page_image_with_metadata(source: Image.Image) -> PreparedVlmImage:
         prepared_dimensions=dimensions,
         scale=scale,
         preparation_ms=(time.perf_counter() - started) * 1000,
+        focus=focus,
     )
 
 
@@ -704,6 +758,7 @@ def transform_page(
         "page_transform": {
             "status": "success",
             "model": getattr(interpreter, "model", None),
+            "page_focus": page_prepared.focus,
             "timing_ms": round(page_transform_ms, 3),
             "response_metadata": response_metadata,
         },
@@ -725,6 +780,7 @@ def transform_page(
                 "width": page_prepared.prepared_dimensions[0],
                 "height": page_prepared.prepared_dimensions[1],
             },
+            "page_focus": page_prepared.focus,
             "drawing_preparation_dimensions": {
                 "width": drawing_dimensions[0],
                 "height": drawing_dimensions[1],

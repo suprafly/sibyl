@@ -4,12 +4,13 @@ from pathlib import Path
 from typing import Any, ClassVar
 
 import pytest
-from PIL import Image
+from PIL import Image, ImageDraw
 
 from sibyl.transform import (
     OllamaDrawingLocalizer,
     OllamaPageInterpreter,
     RegionBounds,
+    _content_bounds,
     format_text_transform,
     format_transform,
     map_prepared_bounds,
@@ -73,6 +74,48 @@ def test_page_resolution_does_not_change_drawing_preparation(
     assert experimental_dimensions == baseline_dimensions == (1536, 2048)
     assert experimental.size == baseline.size
     assert experimental.tobytes() == baseline.tobytes()
+
+
+def test_page_focus_defaults_to_full_and_content_is_opt_in(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    source = Image.new("RGB", (400, 600), "white")
+    ImageDraw.Draw(source).rectangle((50, 100, 349, 499), fill=(20, 20, 20))
+
+    monkeypatch.delenv("SIBYL_PAGE_FOCUS", raising=False)
+    full, full_dimensions = prepare_page_image(source)
+    monkeypatch.setenv("SIBYL_PAGE_FOCUS", "content")
+    focused, focused_dimensions = prepare_page_image(source)
+
+    assert full_dimensions == (400, 600)
+    assert full.size == full_dimensions
+    assert _content_bounds(source) == (50, 100, 350, 500)
+    assert focused.size == focused_dimensions
+    assert focused_dimensions == (300, 400)
+    assert max(focused_dimensions) <= 1536
+    assert focused_dimensions[0] / focused_dimensions[1] == pytest.approx(0.75)
+
+
+def test_content_focus_stays_one_page_and_preserves_drawing_preparation(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    image_path = tmp_path / "page.png"
+    source = Image.new("RGB", (3900, 5200), "white")
+    ImageDraw.Draw(source).rectangle((500, 1000, 3499, 4499), fill=(20, 20, 20))
+    source.save(image_path)
+    monkeypatch.setenv("SIBYL_PAGE_FOCUS", "content")
+    page = transform_page(image_path, PageInterpreter(), drawing_localizer=DrawingLocalizer())
+
+    assert page.runtime["page_transform"]["page_focus"] == "content"
+    assert page.runtime["benchmark"]["page_focus"] == "content"
+    page_dimensions = page.runtime["benchmark"]["page_preparation_dimensions"]
+    assert page_dimensions["width"] <= 1536
+    assert page_dimensions["height"] <= 1536
+    assert page.runtime["benchmark"]["drawing_preparation_dimensions"] == {
+        "width": 1536,
+        "height": 2048,
+    }
+    assert len(page.regions) == 1
 
 
 def test_prepared_coordinate_mapping_is_deterministic() -> None:
