@@ -7,6 +7,11 @@ from collections.abc import Sequence
 from pathlib import Path
 
 from sibyl import __version__
+from sibyl.experiments.transcription_variance import (
+    DEFAULT_OUTPUT,
+    format_variance_result,
+    run_variance_experiment,
+)
 from sibyl.experiments.trocr import format_result, run_experiment
 from sibyl.transform import (
     format_text_transform,
@@ -30,6 +35,20 @@ def build_parser() -> argparse.ArgumentParser:
     )
     trocr.add_argument("image", type=Path, help="image containing one handwritten line or crop")
     trocr.add_argument("--json", action="store_true", help="emit the result as JSON")
+    variance = experiment_commands.add_parser(
+        "transcription-variance", help="repeat page transcription for variance measurement"
+    )
+    variance.add_argument("image", type=Path, help="page image")
+    variance.add_argument("--runs", type=int, help="number of transcription runs")
+    variance.add_argument(
+        "--output",
+        type=Path,
+        default=None,
+        help=(
+            "experimental JSON output path "
+            "(default: .sibyl/experiments/transcription-variance.json)"
+        ),
+    )
     run_parser = commands.add_parser("run", help="transform one handwritten page")
     run_parser.add_argument("image", type=Path, help="page image")
     output = run_parser.add_mutually_exclusive_group()
@@ -50,6 +69,17 @@ def main(argv: Sequence[str] | None = None) -> int:
             print(f"sibyl: error: {error}", file=__import__("sys").stderr)
             return 2
         print(format_result(result, arguments.json))
+    if arguments.command == "experiment" and arguments.experiment_name == "transcription-variance":
+        try:
+            variance_result = run_variance_experiment(
+                arguments.image,
+                runs=arguments.runs,
+                output_path=arguments.output or DEFAULT_OUTPUT,
+            )
+        except (FileNotFoundError, RuntimeError, ValueError) as error:
+            print(f"sibyl: error: {error}", file=__import__("sys").stderr)
+            return 2
+        print(format_variance_result(variance_result))
     if arguments.command == "run":
         try:
             page = transform_page(arguments.image)

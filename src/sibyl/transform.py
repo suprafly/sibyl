@@ -9,6 +9,7 @@ import shutil
 import time
 import urllib.error
 import urllib.request
+from collections.abc import Callable
 from dataclasses import asdict, dataclass, field
 from io import BytesIO
 from pathlib import Path
@@ -195,11 +196,17 @@ def _image_data(image: Image.Image) -> str:
 class OllamaPageInterpreter:
     """Qwen3-VL adapter using Ollama's local chat API and JSON schema output."""
 
-    def __init__(self, model: str | None = None, base_url: str | None = None) -> None:
+    def __init__(
+        self,
+        model: str | None = None,
+        base_url: str | None = None,
+        response_observer: Callable[[dict[str, Any]], None] | None = None,
+    ) -> None:
         self.model = model or os.environ.get("SIBYL_QWEN_MODEL", DEFAULT_QWEN_MODEL)
         configured_url = base_url or os.environ.get("SIBYL_OLLAMA_URL", DEFAULT_OLLAMA_URL)
         self.base_url = configured_url.rstrip("/")
         self.response_metadata: dict[str, Any] = {}
+        self._response_observer = response_observer
 
     @staticmethod
     def _valid_result(result: Any) -> bool:
@@ -294,6 +301,8 @@ class OllamaPageInterpreter:
                 body = json.load(response)
         except (urllib.error.URLError, TimeoutError, json.JSONDecodeError) as error:
             raise RuntimeError(f"Unable to query Ollama/Qwen ({self.model}): {error}") from error
+        if self._response_observer is not None:
+            self._response_observer(cast(dict[str, Any], body))
         message = body.get("message", {})
         result, saw_json, unsupported_shape = self._structured_message(
             message if isinstance(message, dict) else {}

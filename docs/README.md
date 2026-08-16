@@ -7,3 +7,4 @@ This plain-Markdown tree contains repository-owned decisions, concepts, and arch
 - [Concept index](architecture/concepts/CONCEPT_INDEX.md)
 - [Architecture index](architecture/architectures/ARCHITECTURE_INDEX.md)
 - [Create an initial personal handwriting corpus](handwriting-corpus.md)
+- [Transcription variance experiment](transcription-variance.md)
