@@ -57,7 +57,7 @@ def main(argv: Sequence[str] | None = None) -> int:
                 print(format_recovery(page))
             elif arguments.markdown:
                 output_path = write_markdown_recovery(page)
-                print(f"wrote Markdown recovery: {output_path}")
+                print(f"wrote recovery projections: {output_path.parent}")
             else:
                 print(format_text_recovery(page))
         except (FileNotFoundError, RuntimeError, ValueError) as error:

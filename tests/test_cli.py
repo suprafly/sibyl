@@ -1,3 +1,4 @@
+import json
 from pathlib import Path
 
 import pytest
@@ -52,7 +53,10 @@ def _projected_page(tmp_path: Path) -> RecoveredPage:
                 recognizer={},
             ),
         ],
-        runtime={"benchmark": {"region_count": 2}},
+        runtime={
+            "benchmark": {"region_count": 2},
+            "disagreements": [{"order": 0, "qwen": "Heading", "trocr": "Unusual Speling!"}],
+        },
     )
 
 
@@ -83,8 +87,14 @@ def test_recover_markdown_writes_projection_and_asset_reference(
     assert main(["recover", str(tmp_path / "page.png"), "--markdown"]) == 0
     output = capsys.readouterr().out
     markdown = tmp_path / "page.sibyl" / "recovery.md"
-    assert str(markdown) in output
+    assert str(markdown.parent) in output
     assert "![diagram](assets/figure-01.png)" in markdown.read_text()
+    recovery = tmp_path / "page.sibyl" / "recovery.json"
+    structured = json.loads(recovery.read_text())
+    assert structured["interpretation"] == {}
+    assert structured["regions"][0]["qwen_text"] == "Heading"
+    assert structured["regions"][0]["text"] == "Unusual Speling!"
+    assert structured["runtime"]["disagreements"][0]["qwen"] == "Heading"
     assert (tmp_path / "page.sibyl" / "assets" / "figure-01.png").exists()
 
 

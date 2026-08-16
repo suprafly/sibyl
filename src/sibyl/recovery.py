@@ -518,6 +518,16 @@ def format_recovery(page: RecoveredPage) -> str:
     return json.dumps(asdict(page), indent=2)
 
 
+def write_recovery_json(page: RecoveredPage) -> Path:
+    """Persist the complete structured recovery beside its projections."""
+    source_path = Path(page.source["image"])
+    output_directory = source_path.parent / f"{source_path.stem}.sibyl"
+    output_directory.mkdir(parents=True, exist_ok=True)
+    output_path = output_directory / "recovery.json"
+    output_path.write_text(f"{format_recovery(page)}\n", encoding="utf-8")
+    return output_path
+
+
 def format_text_recovery(page: RecoveredPage) -> str:
     """Project only recovered text, preserving model spelling and order."""
     lines: list[str] = []
@@ -537,6 +547,7 @@ def write_markdown_recovery(page: RecoveredPage) -> Path:
     output_directory = source_path.parent / f"{source_path.stem}.sibyl"
     assets_directory = output_directory / "assets"
     output_directory.mkdir(parents=True, exist_ok=True)
+    write_recovery_json(page)
     markdown_lines: list[str] = []
     figure_count = 0
     for region in sorted(page.regions, key=lambda item: item.order):
