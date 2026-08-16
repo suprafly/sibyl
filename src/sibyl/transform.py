@@ -909,7 +909,7 @@ def transform_page(
     trocr_successes = 0
     trocr_failures = 0
     crop_started = time.perf_counter()
-    for raw in spatial_text_raw:
+    for text_index, raw in enumerate(spatial_text_raw, start=1):
         if isinstance(raw.get("bbox_2d"), list):
             bounds, prepared_bounds, normalized_bounds = _text_region_bounds(
                 raw, source.size, prepared.prepared_dimensions
@@ -931,6 +931,10 @@ def transform_page(
         region_image = source.crop((bounds.left, bounds.top, bounds.right, bounds.bottom)).convert(
             "RGB"
         )
+        artifact_directory.mkdir(parents=True, exist_ok=True)
+        text_asset_name = f"text-{text_index:02d}.png"
+        text_asset_path = artifact_directory / text_asset_name
+        region_image.save(text_asset_path, format="PNG")
         kind = str(raw.get("kind", "text"))
         if recognizer is None:
             raise RuntimeError("TrOCR recognizer is unavailable for a spatial text region")
@@ -977,6 +981,32 @@ def transform_page(
             "model_bbox": raw.get("bbox_2d"),
             "bbox_coordinate_space": "qwen_0_1000" if raw.get("bbox_2d") else "legacy_normalized",
             "normalized_bounds": normalized_bounds,
+            "text_crop": f"assets/{text_asset_name}",
+            "crop": {
+                "source_bounds": [bounds.left, bounds.top, bounds.right, bounds.bottom],
+                "prepared_bounds": (
+                    [
+                        prepared_bounds.left,
+                        prepared_bounds.top,
+                        prepared_bounds.right,
+                        prepared_bounds.bottom,
+                    ]
+                    if prepared_bounds
+                    else None
+                ),
+                "width": region_image.width,
+                "height": region_image.height,
+                "representation": "RGB source crop passed to TrOCR",
+            },
+            "padding": {
+                "normalized_proportion": TEXT_REGION_PADDING
+                if raw.get("bbox_2d")
+                else 0.0,
+                "normalized_bounds": pad_normalized_bounds(
+                    normalized_bounds,
+                    TEXT_REGION_PADDING if raw.get("bbox_2d") else 0.0,
+                ),
+            },
             "provenance": ["page_text_localization", "trocr"],
         }
         regions.append(

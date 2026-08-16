@@ -678,6 +678,7 @@ def test_zero_drawings_is_a_successful_text_only_transform(tmp_path: Path) -> No
     assert page.regions == []
     assert page.runtime["drawing_localization"]["status"] == "success"
     assert page.runtime["benchmark"]["drawing_regions"] == 0
+    assert not list((tmp_path / "page.sibyl" / "assets").glob("text-*.png"))
 
 
 class SpatialTextInterpreter:
@@ -751,7 +752,24 @@ def test_spatial_text_uses_ordered_trocr_on_padded_original_resolution_crops(
         {"order": 1, "qwen": "qwen first", "trocr": "first faithful", "status": "success"},
         {"order": 2, "qwen": "qwen second", "trocr": "second faithful", "status": "success"},
     ]
-    assert "page-level evidence" not in write_markdown_transform(page).read_text()
+    markdown = write_markdown_transform(page).read_text()
+    assert "page-level evidence" not in markdown
+    assert "assets/text-01.png" not in markdown
+    assets = sorted((tmp_path / "page.sibyl" / "assets").glob("text-*.png"))
+    assert [asset.name for asset in assets] == ["text-01.png", "text-02.png"]
+    artifact = json.loads((tmp_path / "page.sibyl" / "transform.json").read_text())
+    first = artifact["regions"][0]["source"]
+    assert first["text_crop"] == "assets/text-01.png"
+    assert first["crop"]["source_bounds"] == [
+        page.regions[0].bounds.left,
+        page.regions[0].bounds.top,
+        page.regions[0].bounds.right,
+        page.regions[0].bounds.bottom,
+    ]
+    assert first["crop"]["width"] == Image.open(assets[0]).width
+    assert first["crop"]["height"] == Image.open(assets[0]).height
+    assert Image.open(assets[0]).convert("RGB").tobytes() == recognizer.images[0].tobytes()
+    assert first["padding"]["normalized_proportion"] == pytest.approx(0.02)
 
 
 def test_spatial_trocr_failure_is_explicit_and_does_not_use_qwen_as_canonical(
@@ -777,3 +795,5 @@ def test_spatial_trocr_failure_is_explicit_and_does_not_use_qwen_as_canonical(
     artifact = json.loads(format_transform(page))
     assert artifact["regions"][0]["qwen_text"] == "qwen first"
     assert artifact["regions"][0]["recognizer"]["status"] == "failure"
+    write_markdown_transform(page)
+    assert (tmp_path / "page.sibyl" / "assets" / "text-01.png").exists()
