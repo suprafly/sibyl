@@ -678,3 +678,102 @@ def test_zero_drawings_is_a_successful_text_only_transform(tmp_path: Path) -> No
     assert page.regions == []
     assert page.runtime["drawing_localization"]["status"] == "success"
     assert page.runtime["benchmark"]["drawing_regions"] == 0
+
+
+class SpatialTextInterpreter:
+    model = "fake-qwen"
+
+    def interpret(self, image: Image.Image) -> tuple[dict[str, Any], float]:
+        assert image.size == (1536, 2048)
+        return {
+            "page_interpretation": {"text": ["page-level evidence"]},
+            "page_text": ["page-level evidence"],
+            "regions": [
+                {
+                    "order": 2,
+                    "kind": "text",
+                    "bbox_2d": [500, 500, 700, 650],
+                    "text": "qwen second",
+                },
+                {
+                    "order": 1,
+                    "kind": "text",
+                    "bbox_2d": [100, 100, 300, 250],
+                    "text": "qwen first",
+                },
+            ],
+        }, 11.0
+
+    def release(self) -> None:
+        pass
+
+
+class RecordingRecognizer:
+    def __init__(self, texts: list[str], fail_at: int | None = None) -> None:
+        self.texts = texts
+        self.fail_at = fail_at
+        self.images: list[Image.Image] = []
+
+    def recognize(self, image: Image.Image) -> tuple[str, float]:
+        index = len(self.images)
+        self.images.append(image.copy())
+        if index == self.fail_at:
+            raise RuntimeError("mock TrOCR failure")
+        return self.texts[index], 2.0
+
+
+def test_spatial_text_uses_ordered_trocr_on_padded_original_resolution_crops(
+    tmp_path: Path,
+) -> None:
+    image_path = tmp_path / "page.png"
+    source = Image.new("RGB", (3900, 5200), "white")
+    source.putpixel((500, 500), (255, 0, 0))
+    source.save(image_path)
+    recognizer = RecordingRecognizer(["first faithful", "second faithful"])
+    page = transform_page(
+        image_path,
+        SpatialTextInterpreter(),
+        recognizer,
+        recognizer_metadata={"device": "cpu"},
+    )
+    assert [region.order for region in page.regions] == [1, 2]
+    assert [region.text for region in page.regions] == ["first faithful", "second faithful"]
+    assert page.page_text == ["first faithful", "second faithful"]
+    assert all(image.width > 300 for image in recognizer.images)
+    assert all(image.height > 300 for image in recognizer.images)
+    assert all(region.source["bbox_coordinate_space"] == "qwen_0_1000" for region in page.regions)
+    assert page.runtime["benchmark"]["spatial_text_regions"] == 2
+    assert page.runtime["benchmark"]["trocr_attempts"] == 2
+    assert page.runtime["benchmark"]["trocr_successes"] == 2
+    assert page.runtime["benchmark"]["trocr_failures"] == 0
+    assert page.runtime["qwen_page_text"] == ["page-level evidence"]
+    assert page.runtime["disagreements"] == [
+        {"order": 1, "qwen": "qwen first", "trocr": "first faithful", "status": "success"},
+        {"order": 2, "qwen": "qwen second", "trocr": "second faithful", "status": "success"},
+    ]
+    assert "page-level evidence" not in write_markdown_transform(page).read_text()
+
+
+def test_spatial_trocr_failure_is_explicit_and_does_not_use_qwen_as_canonical(
+    tmp_path: Path,
+) -> None:
+    image_path = tmp_path / "page.png"
+    Image.new("RGB", (3900, 5200), "white").save(image_path)
+    recognizer = RecordingRecognizer(["unused", "second faithful"], fail_at=0)
+    page = transform_page(
+        image_path,
+        SpatialTextInterpreter(),
+        recognizer,
+        recognizer_metadata={"device": "cpu"},
+    )
+    first = page.regions[0]
+    assert first.text == "[unclear]"
+    assert first.qwen_text == "qwen first"
+    assert first.recognizer["status"] == "failure"
+    assert "mock TrOCR failure" in first.recognizer["error"]
+    assert page.runtime["benchmark"]["trocr_successes"] == 1
+    assert page.runtime["benchmark"]["trocr_failures"] == 1
+    assert page.runtime["disagreements"][0]["qwen"] == "qwen first"
+    artifact = json.loads(format_transform(page))
+    assert artifact["regions"][0]["qwen_text"] == "qwen first"
+    assert artifact["regions"][0]["recognizer"]["status"] == "failure"
