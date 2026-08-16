@@ -105,6 +105,47 @@ def test_qwen_structured_json_is_accepted_from_thinking(monkeypatch: Any) -> Non
     assert result["regions"][0]["kind"] == "figure"
 
 
+def test_qwen_page_interpretation_shape_from_thinking_is_normalized(monkeypatch: Any) -> None:
+    expected_text = [
+        "Xylem",
+        "- transports mineral nutrients and water from root to stem",
+        "Phloem",
+        "- transports food and nutrients from leaves to storage organs.",
+        "Sapling grafting - what we will do now.",
+        "N -> H -> Wurd",
+    ]
+    expected_description = (
+        "Simplified representation of a plant stem with upward arrows indicating "
+        "growth direction (N) and connection to a grafting point (H) and 'Wurd' "
+        "label pointing to the grafted section."
+    )
+    payload = {
+        "page_interpretation": {
+            "text": expected_text,
+            "diagram": [
+                {
+                    "bbox": [0.329, 0.717, 0.427, 0.874],
+                    "description": expected_description,
+                }
+            ],
+        }
+    }
+    monkeypatch.setattr(
+        "urllib.request.urlopen",
+        lambda request, timeout: _ollama_response(
+            {"content": "", "thinking": json.dumps(payload)}
+        ),
+    )
+    result, _ = OllamaPageInterpreter(model="test").interpret(Image.new("L", (1536, 2048)))
+    assert [region["text"] for region in result["regions"][:6]] == expected_text
+    assert result["regions"][6]["kind"] == "figure"
+    assert result["regions"][6]["bbox_2d"] == [505, 1468, 656, 1790]
+    assert result["regions"][6]["text"] == expected_description
+    assert map_prepared_bounds(
+        (505, 1468, 656, 1790), (1536, 2048), (3900, 5200)
+    ) == RegionBounds(1282, 3727, 1666, 4545)
+
+
 def test_qwen_invalid_structured_output_is_explicit(monkeypatch: Any) -> None:
     monkeypatch.setattr(
         "urllib.request.urlopen",
@@ -113,6 +154,19 @@ def test_qwen_invalid_structured_output_is_explicit(monkeypatch: Any) -> None:
     result, _ = OllamaPageInterpreter(model="test").interpret(Image.new("L", (20, 20)))
     assert result["status"] == "failure"
     assert result["raw_response"]["message"]["content"] == "not json"
+
+
+def test_qwen_valid_but_unsupported_json_is_distinguished(monkeypatch: Any) -> None:
+    monkeypatch.setattr(
+        "urllib.request.urlopen",
+        lambda request, timeout: _ollama_response(
+            {"content": json.dumps({"page_interpretation": {"unknown": []}})}
+        ),
+    )
+    result, _ = OllamaPageInterpreter(model="test").interpret(Image.new("L", (20, 20)))
+    assert result["status"] == "failure"
+    assert "valid JSON but unsupported recovery schema" in result["error"]
+    assert "page_interpretation" in result["error"]
 
 
 class FigureInterpreter:

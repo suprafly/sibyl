@@ -136,11 +136,15 @@ class OllamaPageInterpreter:
         nested_figures = (
             interpretation.get("diagrams") if isinstance(interpretation, dict) else None
         )
+        page_text = interpretation.get("text") if isinstance(interpretation, dict) else None
+        page_diagrams = interpretation.get("diagram") if isinstance(interpretation, dict) else None
         if (
             regions is None
             and figures is None
             and nested_regions is None
             and nested_figures is None
+            and page_text is None
+            and page_diagrams is None
         ):
             return False
         if regions is not None:
@@ -179,10 +183,27 @@ class OllamaPageInterpreter:
                 )
             ):
                 return False
+        if page_text is not None and not (
+            isinstance(page_text, list) and all(isinstance(item, str) for item in page_text)
+        ):
+            return False
+        if page_diagrams is not None:
+            valid_diagrams = isinstance(page_diagrams, list) and all(
+                isinstance(item, dict)
+                and isinstance(item.get("bbox"), list)
+                and len(item["bbox"]) == 4
+                and all(isinstance(value, (int, float)) for value in item["bbox"])
+                and isinstance(item.get("description"), str)
+                for item in page_diagrams
+            )
+            if not valid_diagrams:
+                return False
         return True
 
     @staticmethod
-    def _normalize_result(result: dict[str, Any]) -> dict[str, Any]:
+    def _normalize_result(
+        result: dict[str, Any], prepared_size: tuple[int, int]
+    ) -> dict[str, Any]:
         if "regions" in result:
             return result
         if "figures" in result:
@@ -197,6 +218,33 @@ class OllamaPageInterpreter:
             ]
             return result
         interpretation = result.get("page_interpretation", {})
+        page_text = interpretation.get("text", [])
+        page_diagrams = interpretation.get("diagram", [])
+        if page_text or page_diagrams:
+            prepared_width, prepared_height = prepared_size
+            result["regions"] = [
+                {
+                    "order": index,
+                    "kind": "text",
+                    "text": text,
+                    "bbox_2d": [0, 0, prepared_width, prepared_height],
+                }
+                for index, text in enumerate(page_text)
+            ] + [
+                {
+                    "order": len(page_text) + index,
+                    "kind": "figure",
+                    "text": diagram["description"],
+                    "bbox_2d": [
+                        round(diagram["bbox"][0] * prepared_width),
+                        round(diagram["bbox"][1] * prepared_height),
+                        round(diagram["bbox"][2] * prepared_width),
+                        round(diagram["bbox"][3] * prepared_height),
+                    ],
+                }
+                for index, diagram in enumerate(page_diagrams)
+            ]
+            return result
         text_regions = interpretation.get("text_regions", [])
         diagrams = interpretation.get("diagrams", [])
         result["regions"] = [
@@ -219,8 +267,12 @@ class OllamaPageInterpreter:
         return result
 
     @classmethod
-    def _structured_message(cls, message: dict[str, Any]) -> dict[str, Any] | None:
-        """Parse only a complete JSON message, never prose surrounding it."""
+    def _structured_message(
+        cls, message: dict[str, Any]
+    ) -> tuple[dict[str, Any] | None, bool, str | None]:
+        """Parse complete JSON messages, never prose surrounding them."""
+        saw_json = False
+        unsupported_shape: str | None = None
         for field_name in ("content", "thinking"):
             candidate = message.get(field_name)
             if not isinstance(candidate, str):
@@ -229,9 +281,12 @@ class OllamaPageInterpreter:
                 result = json.loads(candidate)
             except json.JSONDecodeError:
                 continue
+            saw_json = True
             if cls._valid_result(result):
-                return cast(dict[str, Any], result)
-        return None
+                return cast(dict[str, Any], result), saw_json, None
+            if isinstance(result, dict):
+                unsupported_shape = ", ".join(sorted(result)) or "object"
+        return None, saw_json, unsupported_shape
 
     def interpret(self, image: Image.Image) -> tuple[dict[str, Any], float]:
         schema = {
@@ -306,7 +361,9 @@ class OllamaPageInterpreter:
         except (urllib.error.URLError, TimeoutError, json.JSONDecodeError) as error:
             raise RuntimeError(f"Unable to query Ollama/Qwen ({self.model}): {error}") from error
         message = body.get("message", {})
-        result = self._structured_message(message if isinstance(message, dict) else {})
+        result, saw_json, unsupported_shape = self._structured_message(
+            message if isinstance(message, dict) else {}
+        )
         self.response_metadata = {
             "prompt_tokens": body.get("prompt_eval_count"),
             "output_tokens": body.get("eval_count"),
@@ -317,12 +374,21 @@ class OllamaPageInterpreter:
             ],
         }
         if result is None:
+            if saw_json:
+                structured_error = (
+                    "Qwen returned valid JSON but unsupported recovery schema: "
+                    f"{unsupported_shape or 'unknown'}"
+                )
+            else:
+                structured_error = (
+                    "Ollama/Qwen returned no valid structured JSON in content or thinking"
+                )
             return {
                 "status": "failure",
-                "error": "Ollama/Qwen returned no valid structured JSON in content or thinking",
+                "error": structured_error,
                 "raw_response": body,
             }, (time.perf_counter() - started) * 1000
-        return self._normalize_result(result), (time.perf_counter() - started) * 1000
+        return self._normalize_result(result, image.size), (time.perf_counter() - started) * 1000
 
     def release(self) -> None:
         # keep_alive=0 on the interpretation request asks Ollama to release the model.
