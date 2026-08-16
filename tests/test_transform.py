@@ -13,8 +13,8 @@ from sibyl.transform import (
     format_transform,
     map_prepared_bounds,
     pad_normalized_bounds,
-    pad_prepared_bounds,
     prepare_vlm_image,
+    qwen_bbox_to_normalized,
     transform_page,
     write_markdown_transform,
 )
@@ -240,11 +240,11 @@ def test_qwen_valid_but_unsupported_json_is_distinguished(monkeypatch: Any) -> N
     assert "page_interpretation" in result["error"]
 
 
-def test_drawing_localizer_accepts_content_json_and_uses_dedicated_schema(
+def test_drawing_localizer_accepts_qwen_0_1000_content_json_and_uses_dedicated_schema(
     monkeypatch: Any,
 ) -> None:
     requests: list[dict[str, Any]] = []
-    payload = {"drawings": [{"bbox_2d": [0.1, 0.2, 0.8, 0.9], "description": "complete figure"}]}
+    payload = {"drawings": [{"bbox_2d": [100, 200, 800, 900], "description": "complete figure"}]}
 
     def urlopen(request: Any, timeout: int) -> _Response:
         requests.append(json.loads(request.data))
@@ -256,9 +256,9 @@ def test_drawing_localizer_accepts_content_json_and_uses_dedicated_schema(
     assert result == {
         "drawings": [
             {
-                "bbox_2d": [0.1, 0.2, 0.8, 0.9],
-                "model_bbox": [0.1, 0.2, 0.8, 0.9],
-                "bbox_coordinate_space": "normalized",
+                "bbox_2d": [100.0, 200.0, 800.0, 900.0],
+                "model_bbox": [100.0, 200.0, 800.0, 900.0],
+                "bbox_coordinate_space": "qwen_0_1000",
                 "description": "complete figure",
             }
         ]
@@ -269,7 +269,7 @@ def test_drawing_localizer_accepts_content_json_and_uses_dedicated_schema(
 
 
 def test_drawing_localizer_accepts_thinking_json(monkeypatch: Any) -> None:
-    payload = {"drawings": [{"bbox_2d": [0.0, 0.0, 1.0, 1.0]}]}
+    payload = {"drawings": [{"bbox_2d": [0, 0, 1000, 1000]}]}
     monkeypatch.setattr(
         "urllib.request.urlopen",
         lambda request, timeout: _ollama_response({"content": "", "thinking": json.dumps(payload)}),
@@ -278,9 +278,9 @@ def test_drawing_localizer_accepts_thinking_json(monkeypatch: Any) -> None:
     assert result == {
         "drawings": [
             {
-                "bbox_2d": [0.0, 0.0, 1.0, 1.0],
-                "model_bbox": [0.0, 0.0, 1.0, 1.0],
-                "bbox_coordinate_space": "normalized",
+                "bbox_2d": [0.0, 0.0, 1000.0, 1000.0],
+                "model_bbox": [0.0, 0.0, 1000.0, 1000.0],
+                "bbox_coordinate_space": "qwen_0_1000",
             }
         ]
     }
@@ -288,7 +288,7 @@ def test_drawing_localizer_accepts_thinking_json(monkeypatch: Any) -> None:
 
 def test_drawing_localizer_normalizes_established_bbox_alias(monkeypatch: Any) -> None:
     payload = {
-        "drawings": [{"bbox": [0.2, 0.3, 0.7, 0.8], "description": "existing fixture shape"}]
+        "drawings": [{"bbox": [200, 300, 700, 800], "description": "existing fixture shape"}]
     }
     monkeypatch.setattr(
         "urllib.request.urlopen",
@@ -298,16 +298,16 @@ def test_drawing_localizer_normalizes_established_bbox_alias(monkeypatch: Any) -
     assert result == {
         "drawings": [
             {
-                "bbox_2d": [0.2, 0.3, 0.7, 0.8],
-                "model_bbox": [0.2, 0.3, 0.7, 0.8],
-                "bbox_coordinate_space": "normalized",
+                "bbox_2d": [200.0, 300.0, 700.0, 800.0],
+                "model_bbox": [200.0, 300.0, 700.0, 800.0],
+                "bbox_coordinate_space": "qwen_0_1000",
                 "description": "existing fixture shape",
             }
         ]
     }
 
 
-def test_drawing_localizer_accepts_observed_prepared_pixel_fixture(
+def test_drawing_localizer_accepts_observed_qwen_0_1000_fixture(
     monkeypatch: Any,
 ) -> None:
     payload = {
@@ -328,24 +328,24 @@ def test_drawing_localizer_accepts_observed_prepared_pixel_fixture(
     result, _ = OllamaDrawingLocalizer(model="test").localize(Image.new("L", (1536, 2048)))
     drawing = result["drawings"][0]
     assert drawing["model_bbox"] == [330.0, 707.0, 887.0, 872.0]
-    assert drawing["bbox_coordinate_space"] == "prepared_pixels"
+    assert drawing["bbox_coordinate_space"] == "qwen_0_1000"
     assert drawing["description"] == payload["drawings"][0]["description"]
 
 
-def test_drawing_localizer_accepts_prepared_pixel_bbox_alias(monkeypatch: Any) -> None:
+def test_drawing_localizer_accepts_qwen_0_1000_bbox_alias(monkeypatch: Any) -> None:
     payload = {"drawings": [{"bbox": [330, 707, 887, 872]}]}
     monkeypatch.setattr(
         "urllib.request.urlopen",
         lambda request, timeout: _ollama_response({"content": json.dumps(payload)}),
     )
     result, _ = OllamaDrawingLocalizer(model="test").localize(Image.new("L", (1536, 2048)))
-    assert result["drawings"][0]["bbox_coordinate_space"] == "prepared_pixels"
+    assert result["drawings"][0]["bbox_coordinate_space"] == "qwen_0_1000"
     assert result["drawings"][0]["model_bbox"] == [330.0, 707.0, 887.0, 872.0]
 
 
 @pytest.mark.parametrize(
     "bbox",
-    ([0, -1, 10, 20], [0, 0, 1537, 2048], [10, 20, 10, 21], [0, 0, 0, 1]),
+    ([0, -1, 10, 20], [0, 0, 1001, 1000], [10, 20, 10, 21], [0, 0, 0, 1]),
 )
 def test_drawing_localizer_rejects_invalid_coordinate_ranges(
     monkeypatch: Any, bbox: list[int]
@@ -358,15 +358,6 @@ def test_drawing_localizer_rejects_invalid_coordinate_ranges(
     result, _ = OllamaDrawingLocalizer(model="test").localize(Image.new("L", (1536, 2048)))
     assert result["status"] == "failure"
     assert "invalid bbox" in result["error"]
-
-
-def test_prepared_pixel_padding_preserves_pixel_space_and_clamps() -> None:
-    assert pad_prepared_bounds((330, 707, 887, 872), (1536, 2048)) == pytest.approx(
-        (302.15, 698.75, 914.85, 880.25)
-    )
-    assert pad_prepared_bounds((0, 0, 10, 20), (1536, 2048)) == pytest.approx(
-        (0, 0, 10.5, 21)
-    )
 
 
 def test_drawing_localizer_reports_valid_json_with_unsupported_entry(monkeypatch: Any) -> None:
@@ -500,7 +491,7 @@ def test_figure_crops_use_mapped_original_coordinates_and_record_benchmark(tmp_p
     assert benchmark["total_transform_ms"] > 0
 
 
-def test_runy_preserves_source_qwen_text_and_recognizer_evidence(tmp_path: Path) -> None:
+def test_transform_preserves_source_qwen_text_and_recognizer_evidence(tmp_path: Path) -> None:
     image_path = tmp_path / "page.png"
     Image.new("RGB", (100, 100), "white").save(image_path)
     page = transform_page(
@@ -546,7 +537,7 @@ class FakeDrawingLocalizer:
         pass
 
 
-class PreparedPixelDrawingLocalizer:
+class QwenDrawingLocalizer:
     model = "fake-drawing-qwen"
     response_metadata: ClassVar[dict[str, list[str]]] = {"response_fields": ["content"]}
 
@@ -558,7 +549,7 @@ class PreparedPixelDrawingLocalizer:
                     {
                         "bbox_2d": [330, 707, 887, 872],
                         "model_bbox": [330, 707, 887, 872],
-                        "bbox_coordinate_space": "prepared_pixels",
+                        "bbox_coordinate_space": "qwen_0_1000",
                         "description": "model evidence",
                     }
                 ]
@@ -611,7 +602,7 @@ def test_dedicated_localization_preserves_text_descriptions_coordinates_and_mark
     assert "model evidence" not in markdown
 
 
-def test_prepared_pixel_bbox_maps_and_crops_original_source_for_markdown(
+def test_qwen_bbox_maps_and_crops_original_source_for_markdown(
     tmp_path: Path,
 ) -> None:
     image_path = tmp_path / "page.png"
@@ -620,19 +611,28 @@ def test_prepared_pixel_bbox_maps_and_crops_original_source_for_markdown(
         image_path,
         PageOnlyInterpreter(),
         FailingRecognizer(),
-        drawing_localizer=PreparedPixelDrawingLocalizer(),
+        drawing_localizer=QwenDrawingLocalizer(),
     )
     region = page.regions[0]
     assert region.normalized_bounds == pytest.approx(
-        (330 / 1536, 707 / 2048, 887 / 1536, 872 / 2048)
+        (0.33, 0.707, 0.887, 0.872)
     )
-    assert region.prepared_bounds == RegionBounds(302, 699, 915, 880)
-    assert region.bounds == RegionBounds(767, 1775, 2323, 2234)
+    assert region.prepared_bounds == RegionBounds(464, 1431, 1405, 1803)
+    assert region.bounds == RegionBounds(1178, 3633, 3567, 4578)
     assert region.source["model_bbox"] == [330, 707, 887, 872]
-    assert region.source["bbox_coordinate_space"] == "prepared_pixels"
-    assert Image.open(region.source["crop"]).size == (1556, 459)
+    assert region.source["bbox_coordinate_space"] == "qwen_0_1000"
+    assert Image.open(region.source["crop"]).size == (2389, 945)
     assert write_markdown_transform(page).read_text() == (
         "Exact page text\n\n![Figure 1](assets/figure-01.png)\n"
+    )
+
+
+def test_qwen_bbox_conversion_is_not_literal_prepared_pixel_interpretation() -> None:
+    assert qwen_bbox_to_normalized((330, 707, 887, 872)) == pytest.approx(
+        (0.33, 0.707, 0.887, 0.872)
+    )
+    assert qwen_bbox_to_normalized((330, 707, 887, 872)) != pytest.approx(
+        (330 / 1536, 707 / 2048, 887 / 1536, 872 / 2048)
     )
 
 

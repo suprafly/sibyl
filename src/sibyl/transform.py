@@ -392,10 +392,8 @@ class OllamaPageInterpreter:
         return None
 
 
-def _drawing_bbox_coordinate_space(
-    bbox: Any, prepared_size: tuple[int, int]
-) -> str | None:
-    """Classify a drawing bbox without accepting out-of-domain coordinates."""
+def _valid_qwen_bbox(bbox: Any) -> bool:
+    """Validate Qwen3-VL's documented 0-1000 drawing coordinates."""
     if not (
         isinstance(bbox, list)
         and len(bbox) == 4
@@ -406,16 +404,12 @@ def _drawing_bbox_coordinate_space(
             for value in bbox
         )
     ):
-        return None
-    if all(0 <= value <= 1 for value in bbox):
-        valid = bbox[0] < bbox[2] and bbox[1] < bbox[3]
-        return "normalized" if valid else None
-    width, height = prepared_size
-    valid = (
-        0 <= bbox[0] < bbox[2] <= width
-        and 0 <= bbox[1] < bbox[3] <= height
+        return False
+    return (
+        all(0 <= value <= 1000 for value in bbox)
+        and bbox[0] < bbox[2]
+        and bbox[1] < bbox[3]
     )
-    return "prepared_pixels" if valid else None
 
 
 class OllamaDrawingLocalizer:
@@ -430,7 +424,6 @@ class OllamaDrawingLocalizer:
     @staticmethod
     def _normalize_result(
         result: Any,
-        prepared_size: tuple[int, int],
     ) -> tuple[dict[str, Any] | None, str | None, list[Any]]:
         if not isinstance(result, dict):
             return None, "expected a JSON object", []
@@ -447,13 +440,12 @@ class OllamaDrawingLocalizer:
                 )
             bbox_key = "bbox_2d" if "bbox_2d" in drawing else "bbox"
             bbox = drawing.get(bbox_key)
-            coordinate_space = _drawing_bbox_coordinate_space(bbox, prepared_size)
-            if coordinate_space is None:
+            if not _valid_qwen_bbox(bbox):
                 return (
                     None,
                     (
-                        f"drawing entry {index} has invalid bbox: expected normalized or "
-                        "prepared-image pixel bbox_2d or bbox [x1, y1, x2, y2]"
+                        f"drawing entry {index} has invalid bbox: expected Qwen3-VL "
+                        "0-1000 bbox_2d or bbox [x1, y1, x2, y2]"
                     ),
                     [drawing],
                 )
@@ -464,7 +456,7 @@ class OllamaDrawingLocalizer:
             normalized_drawing: dict[str, Any] = {
                 "bbox_2d": list(bbox_values),
                 "model_bbox": list(bbox_values),
-                "bbox_coordinate_space": coordinate_space,
+                "bbox_coordinate_space": "qwen_0_1000",
             }
             if description is not None:
                 normalized_drawing["description"] = description
@@ -473,7 +465,7 @@ class OllamaDrawingLocalizer:
 
     @classmethod
     def _structured_message(
-        cls, message: dict[str, Any], prepared_size: tuple[int, int]
+        cls, message: dict[str, Any]
     ) -> tuple[dict[str, Any] | None, bool, str | None, list[Any]]:
         saw_json = False
         unsupported_shape: str | None = None
@@ -487,7 +479,7 @@ class OllamaDrawingLocalizer:
             except json.JSONDecodeError:
                 continue
             saw_json = True
-            normalized, reason, entries = cls._normalize_result(result, prepared_size)
+            normalized, reason, entries = cls._normalize_result(result)
             if normalized is not None:
                 return normalized, saw_json, None, []
             unsupported_shape = reason or "unsupported JSON value"
@@ -557,7 +549,7 @@ class OllamaDrawingLocalizer:
             }, (time.perf_counter() - started) * 1000
         message = body.get("message", {})
         result, saw_json, unsupported_shape, unsupported_entries = self._structured_message(
-            message if isinstance(message, dict) else {}, image.size
+            message if isinstance(message, dict) else {}
         )
         self.response_metadata = {
             "prompt_tokens": body.get("prompt_eval_count"),
@@ -611,23 +603,13 @@ def pad_normalized_bounds(
     )
 
 
-def pad_prepared_bounds(
+def qwen_bbox_to_normalized(
     bounds: tuple[float, float, float, float],
-    prepared_size: tuple[int, int],
-    proportion: float = 0.05,
 ) -> tuple[float, float, float, float]:
-    """Apply the existing proportional padding in prepared-image pixels."""
-    left, top, right, bottom = bounds
-    width = right - left
-    height = bottom - top
-    horizontal_padding = width * proportion
-    vertical_padding = height * proportion
-    prepared_width, prepared_height = prepared_size
-    return (
-        max(0.0, left - horizontal_padding),
-        max(0.0, top - vertical_padding),
-        min(float(prepared_width), right + horizontal_padding),
-        min(float(prepared_height), bottom + vertical_padding),
+    """Convert Qwen3-VL 0-1000 coordinates to the internal 0..1 form."""
+    return cast(
+        tuple[float, float, float, float],
+        tuple(value / 1000 for value in bounds),
     )
 
 
@@ -895,50 +877,21 @@ def transform_page(
         description,
         localization_observation,
     ) in drawing_entries:
-        if coordinate_space == "prepared_pixels":
-            padded_prepared = pad_prepared_bounds(model_bbox, prepared.prepared_dimensions)
-            prepared_bounds = RegionBounds(
-                *(round(value) for value in padded_prepared)
-            )
-            normalized_bounds = cast(
-                tuple[float, float, float, float],
-                tuple(
-                    value / dimension
-                    for value, dimension in zip(
-                        model_bbox,
-                        (
-                            prepared.prepared_dimensions[0],
-                            prepared.prepared_dimensions[1],
-                            prepared.prepared_dimensions[0],
-                            prepared.prepared_dimensions[1],
-                        ),
-                        strict=True,
-                    )
-                ),
-            )
-            padded_normalized = tuple(
-                value / dimension
-                for value, dimension in zip(
-                    padded_prepared,
-                    (
-                        prepared.prepared_dimensions[0],
-                        prepared.prepared_dimensions[1],
-                        prepared.prepared_dimensions[0],
-                        prepared.prepared_dimensions[1],
-                    ),
-                    strict=True,
-                )
-            )
-        else:
+        if coordinate_space == "qwen_0_1000":
+            normalized_bounds = qwen_bbox_to_normalized(model_bbox)
+        elif coordinate_space == "normalized":
+            # Compatibility for page-response fixtures that already provide 0..1 values.
             normalized_bounds = model_bbox
-            padded_normalized = (
-                normalized_bounds
-                if drawing_localization_runtime["status"] == "legacy_page_response"
-                else pad_normalized_bounds(normalized_bounds)
-            )
-            prepared_bounds = _normalized_to_prepared_bounds(
-                padded_normalized, prepared.prepared_dimensions
-            )
+        else:
+            raise ValueError(f"unsupported drawing coordinate space: {coordinate_space}")
+        padded_normalized = (
+            normalized_bounds
+            if drawing_localization_runtime["status"] == "legacy_page_response"
+            else pad_normalized_bounds(normalized_bounds)
+        )
+        prepared_bounds = _normalized_to_prepared_bounds(
+            padded_normalized, prepared.prepared_dimensions
+        )
         bounds = map_prepared_bounds(
             (
                 prepared_bounds.left,
