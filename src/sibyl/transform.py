@@ -177,20 +177,29 @@ class OllamaPageInterpreter:
             "required": ["page_interpretation"],
         }
         prompt = (
-            "Transcribe the handwritten textual notes on this page in reading order. "
-            "Read the actual handwriting rather than semantically correcting it. "
-            "Preserve wording, spelling, capitalization, punctuation, shorthand, and "
-            "unfamiliar terminology. Do not invent text. Use [unclear] only where the "
-            "handwriting is genuinely unreadable. Do not transcribe graphical elements "
-            "of diagrams as page text, including graphical arrows, diagram strokes, "
-            "connectors, and other purely graphical marks. Handwritten words remain text "
-            "even when they are near a drawing. Return only the requested structured JSON."
+            "Transform this handwritten page. Return only JSON matching the schema. "
+            "Transcribe the ordinary handwritten notes and textual marks visible on the page "
+            "in reading "
+            "order. Read the actual handwriting and preserve the wording, spelling, "
+            "capitalization, punctuation, shorthand, symbols that are genuinely part "
+            "of written text, and unfamiliar terminology. Do not autocorrect, replace "
+            "a word with a semantically more likely word, normalize unfamiliar words, "
+            "or invent text. Use [unclear] only when the letterforms are genuinely "
+            "unreadable. Do not transcribe graphical elements of drawings or diagrams "
+            "as page text, including arrows, diagram strokes, lines, and graphical "
+            "connectors that clearly function as graphics. A handwritten word remains "
+            "text even when it is physically near a drawing; do not exclude text merely "
+            "because it is beside, above, below, or adjacent to a figure. Do not "
+            "enumerate spatial text regions, drawings, or invent coordinates. Do not "
+            "perform exhaustive text localization; a separate pass handles drawing "
+            "localization."
         )
         payload = {
             "model": self.model,
             "stream": False,
             "think": False,
             "format": schema,
+            "options": {"num_predict": 256},
             "keep_alive": 0,
             "messages": [{"role": "user", "content": prompt, "images": [_image_data(image)]}],
         }

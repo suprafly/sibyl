@@ -89,17 +89,39 @@ def test_qwen_page_prompt_preserves_nearby_handwriting_and_excludes_graphics(
     OllamaPageInterpreter(model="test").interpret(Image.new("L", (20, 20)))
     request = requests[0]
     prompt = request["messages"][0]["content"]
+    assert prompt == (
+        "Transform this handwritten page. Return only JSON matching the schema. "
+        "Transcribe the ordinary handwritten notes and textual marks visible on the page "
+        "in reading "
+        "order. Read the actual handwriting and preserve the wording, spelling, "
+        "capitalization, punctuation, shorthand, symbols that are genuinely part "
+        "of written text, and unfamiliar terminology. Do not autocorrect, replace "
+        "a word with a semantically more likely word, normalize unfamiliar words, "
+        "or invent text. Use [unclear] only when the letterforms are genuinely "
+        "unreadable. Do not transcribe graphical elements of drawings or diagrams "
+        "as page text, including arrows, diagram strokes, lines, and graphical "
+        "connectors that clearly function as graphics. A handwritten word remains "
+        "text even when it is physically near a drawing; do not exclude text merely "
+        "because it is beside, above, below, or adjacent to a figure. Do not "
+        "enumerate spatial text regions, drawings, or invent coordinates. Do not "
+        "perform exhaustive text localization; a separate pass handles drawing "
+        "localization."
+    )
+    assert request["options"]["num_predict"] == 256
+    assert request["think"] is False
+    assert request["stream"] is False
+    assert request["keep_alive"] == 0
     for phrase in (
         "reading order",
-        "Preserve wording, spelling",
+        "preserve the wording, spelling",
         "unfamiliar terminology",
-        "Do not invent text",
+        "or invent text",
         "[unclear]",
-        "graphical arrows",
+        "including arrows",
         "diagram strokes",
         "connectors",
-        "Handwritten words remain text",
-        "near a drawing",
+        "A handwritten word remains text",
+        "physically near a drawing",
     ):
         assert phrase in prompt
     assert "Scion" not in prompt
