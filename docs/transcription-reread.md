@@ -1,15 +1,36 @@
 # Targeted transcription reread experiment
 
 This investigation follows the transcription-variance experiment. It repeats
-page observations, identifies disagreements between structured page-text
-lines, and then gathers independent rereads of localized source-resolution
-text crops. It measures whether targeted visual evidence narrows uncertainty;
-it does not produce production OCR or ground truth.
+page observations, normalizes presentation-only variation, identifies actual
+divergent text spans, and then gathers independent rereads of localized
+source-resolution text crops. It measures whether targeted visual evidence
+narrows uncertainty; it does not produce production OCR or ground truth.
 
 The experiment intentionally does not majority-vote or adjudicate. Every page
 candidate and every targeted reread remains an observation for later human
 evaluation. Targeted rereads do not receive the competing candidate list, so
 they are independent visual observations rather than prompted choices.
+
+The comparison treats Markdown bullets, repeated blank lines, whitespace, and
+line wrapping as presentation. It preserves lexical tokens, punctuation,
+numbers, capitalization, and meaningful word boundaries. The conceptual flow
+is:
+
+```text
+page observations
+        ↓
+normalized textual comparison
+        ↓
+actual divergent spans
+        ↓
+text-region localization
+        ↓
+source-resolution crop
+        ↓
+independent targeted reread
+```
+
+The result is additional evidence, not a determination of ground truth.
 
 ## Run it
 

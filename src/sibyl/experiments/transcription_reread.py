@@ -3,8 +3,10 @@
 from __future__ import annotations
 
 import base64
+import difflib
 import json
 import os
+import re
 import time
 import urllib.error
 import urllib.request
@@ -229,28 +231,115 @@ def _valid_regions(regions: Any) -> bool:
     return True
 
 
-def _disagreements(page_result: VarianceResult) -> list[dict[str, Any]]:
+def _normalized_tokens(lines: list[str]) -> tuple[list[str], list[int]]:
+    tokens: list[str] = []
+    line_indices: list[int] = []
+    for line_index, line in enumerate(lines):
+        without_bullet = re.sub(r"^\s*(?:[-*•]\s*)+", "", line)
+        line_tokens = re.findall(r"\w+|[^\w\s]", without_bullet, flags=re.UNICODE)
+        tokens.extend(line_tokens)
+        line_indices.extend([line_index] * len(line_tokens))
+    return tokens, line_indices
+
+
+def _detokenize(tokens: list[str]) -> str:
+    result = ""
+    for token in tokens:
+        if not result or token in ".,!?;:%)]}" or result.endswith(("(", "[", "{")):
+            result += token
+        else:
+            result += f" {token}"
+    return result
+
+
+def _replacement_for_span(
+    base: list[str], other: list[str], start: int, end: int
+) -> list[str]:
+    replacement: list[str] = []
+    matcher = difflib.SequenceMatcher(a=base, b=other, autojunk=False)
+    for tag, base_start, base_end, other_start, other_end in matcher.get_opcodes():
+        if tag == "equal":
+            overlap_start = max(start, base_start)
+            overlap_end = min(end, base_end)
+            if overlap_start < overlap_end:
+                offset = overlap_start - base_start
+                replacement.extend(
+                    other[
+                        other_start + offset : other_start + offset + overlap_end - overlap_start
+                    ]
+                )
+        elif base_start == base_end:
+            if start <= base_start <= end:
+                replacement.extend(other[other_start:other_end])
+        elif max(start, base_start) < min(end, base_end):
+            replacement.extend(other[other_start:other_end])
+    return replacement
+
+
+def _candidate_ranges(base: list[str], observations: list[list[str]]) -> list[tuple[int, int]]:
+    ranges: list[tuple[int, int]] = []
+    for other in observations[1:]:
+        matcher = difflib.SequenceMatcher(a=base, b=other, autojunk=False)
+        ranges.extend(
+            (base_start, base_end)
+            for tag, base_start, base_end, _other_start, _other_end in matcher.get_opcodes()
+            if tag != "equal"
+        )
+    merged: list[tuple[int, int]] = []
+    for start, end in sorted(ranges):
+        if merged and start <= merged[-1][1]:
+            merged[-1] = (merged[-1][0], max(merged[-1][1], end))
+        else:
+            merged.append((start, end))
+    return merged
+
+
+def _disagreements(
+    page_result: VarianceResult,
+) -> tuple[list[dict[str, Any]], dict[str, Any]]:
     successful = [run for run in page_result.runs if run.status == "ok" and run.lines is not None]
     if not successful:
-        return []
-    line_count = max(len(run.lines or []) for run in successful)
+        return [], {"runs": []}
+    token_runs = [_normalized_tokens(run.lines or []) for run in successful]
+    base_tokens, base_line_indices = token_runs[0]
+    ranges = _candidate_ranges(base_tokens, [tokens for tokens, _ in token_runs])
     disagreements: list[dict[str, Any]] = []
-    for index in range(line_count):
-        values = [
-            (run.lines or [])[index]
-            for run in successful
-            if index < len(run.lines or [])
+    for start, end in ranges:
+        readings = [
+            _detokenize(_replacement_for_span(base_tokens, tokens, start, end))
+            for tokens, _ in token_runs
         ]
-        candidates = list(dict.fromkeys(values))
-        if len(candidates) > 1:
-            disagreements.append(
-                {
-                    "region_id": f"region-{len(disagreements) + 1:02d}",
-                    "line_index": index,
-                    "page_candidates": candidates,
-                }
-            )
-    return disagreements
+        candidates = list(dict.fromkeys(readings))
+        if len(candidates) <= 1:
+            continue
+        line_indices = sorted(
+            set(base_line_indices[start:end])
+            if start < end
+            else {base_line_indices[start] if start < len(base_line_indices) else -1}
+        )
+        disagreements.append(
+            {
+                "candidate_id": f"candidate-{len(disagreements) + 1:02d}",
+                "region_id": f"candidate-{len(disagreements) + 1:02d}",
+                "line_index": line_indices[0] if len(line_indices) == 1 else None,
+                "line_indices": line_indices,
+                "context_before": _detokenize(base_tokens[max(0, start - 8) : start]),
+                "context_after": _detokenize(base_tokens[end : end + 8]),
+                "candidates": candidates,
+                "page_candidates": candidates,
+                "observations": [
+                    {"run": run.run, "reading": reading}
+                    for run, reading in zip(successful, readings, strict=True)
+                ],
+            }
+        )
+    normalized = {
+        "runs": [
+            {"run": run.run, "tokens": tokens}
+            for run, (tokens, _line_indices) in zip(successful, token_runs, strict=True)
+        ]
+    }
+    return disagreements, normalized
 
 
 def _source_crop(
@@ -333,7 +422,7 @@ def run_reread_experiment(
     )
     source = cast(Image.Image, prepared_capture["source"])
     prepared = cast(PreparedVlmImage, prepared_capture["prepared"])
-    disagreements = _disagreements(page_result)
+    disagreements, normalized_comparison = _disagreements(page_result)
     artifact: dict[str, Any] = {
         "experiment": "transcription_reread",
         "source": page_result.source,
@@ -343,6 +432,7 @@ def run_reread_experiment(
         "prepared_image_hash": prepared_image_hash(prepared),
         "page_runs_requested": page_result.runs_requested,
         "page_observations": asdict(page_result),
+        "normalized_comparison": normalized_comparison,
         "disagreements": disagreements,
         "localization": {"status": "not_run"},
         "targeted_rereads": rereads,
@@ -388,7 +478,11 @@ def run_reread_experiment(
     ordered_regions = sorted(
         regions, key=lambda region: int(region.get("order", regions.index(region)))
     )
-    if any(disagreement["line_index"] >= len(ordered_regions) for disagreement in disagreements):
+    if any(
+        disagreement["line_index"] is None
+        or disagreement["line_index"] >= len(ordered_regions)
+        for disagreement in disagreements
+    ):
         artifact["localization"] = {
             "status": "unavailable",
             "message": "candidate disagreement detected; targeted localization unavailable",
@@ -485,14 +579,26 @@ def format_reread_result(result: dict[str, Any]) -> str:
         f"{result['prepared_dimensions']['width']}x{result['prepared_dimensions']['height']}",
         f"page image hash: {result['prepared_image_hash']}",
         "",
-        f"Disagreement regions: {len(result['disagreements'])}",
+        f"Disagreement candidates: {len(result['disagreements'])}",
     ]
     for disagreement in result["disagreements"]:
-        lines.extend([f"\n{disagreement['region_id']}:", "  page candidates:"])
-        lines.extend(f"    {candidate}" for candidate in disagreement["page_candidates"])
+        lines.extend(
+            [
+                f"\n{disagreement['candidate_id']}:",
+                f"  context before: {disagreement['context_before']}",
+                f"  context after: {disagreement['context_after']}",
+                "  page candidates: " + ", ".join(disagreement["candidates"]),
+                "  readings:",
+            ]
+        )
+        lines.extend(
+            f"    run {observation['run']}: {observation['reading']}"
+            for observation in disagreement["observations"]
+        )
         if "crop" not in disagreement:
             lines.append("  targeted localization unavailable")
             continue
+        lines.append(f"  localization: {disagreement['bbox']['bbox_2d']}")
         lines.append(f"  crop: {disagreement['crop']['path']}")
         lines.append("  rereads:")
         for reread in disagreement["rereads"]:

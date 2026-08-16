@@ -10,9 +10,11 @@ from sibyl.experiments.transcription_reread import (
     LOCALIZATION_SCHEMA,
     TARGETED_PROMPT,
     TARGETED_SCHEMA,
+    _disagreements,
     format_reread_result,
     run_reread_experiment,
 )
+from sibyl.experiments.transcription_variance import VarianceResult, VarianceRun
 from sibyl.transform import PreparedVlmImage, prepare_page_image_with_metadata
 
 
@@ -92,6 +94,91 @@ def _page_factory(created: list[FakePageInterpreter]) -> Callable[..., FakePageI
     return factory
 
 
+def _variance(*observations: list[str]) -> VarianceResult:
+    runs = [
+        VarianceRun(
+            run=index,
+            status="ok",
+            text="\n".join(lines),
+            raw_response={},
+            duration_ms=1.0,
+            lines=lines,
+        )
+        for index, lines in enumerate(observations, start=1)
+    ]
+    return VarianceResult(
+        experiment="transcription_variance",
+        runs_requested=len(runs),
+        runs_completed=len(runs),
+        source="page.png",
+        page_focus="full",
+        model="qwen3-vl:8b",
+        prepared_dimensions={"width": 100, "height": 100},
+        prepared_image_hash="hash",
+        request_controls={},
+        runs=runs,
+        comparison={},
+        failure_summary={"ok": len(runs), "invalid_response": 0, "failed": 0},
+    )
+
+
+@pytest.mark.parametrize(
+    ("observations", "other"),
+    [
+        (["same text"], ["same text"]),
+        (["same   text", "next"], ["same text", "next"]),
+        (["- transports mineral nutrients"], ["• transports mineral nutrients"]),
+        (
+            ["transports mineral nutrients", "and water from root to", "scion"],
+            ["transports mineral nutrients and water from root to", "scion"],
+        ),
+    ],
+)
+def test_formatting_and_wrapping_variation_is_not_a_disagreement(
+    observations: list[str], other: list[str]
+) -> None:
+    disagreements, _normalized = _disagreements(_variance(observations, other))
+    assert disagreements == []
+
+
+def test_word_substitution_is_one_candidate_with_context() -> None:
+    disagreements, _normalized = _disagreements(
+        _variance(
+            ["Xylem", "transports mineral nutrients and water from root to scion"],
+            ["Xylem", "transports mineral nutrients and water from root to scler"],
+            ["Xylem", "transports mineral nutrients and water from root to stem"],
+        )
+    )
+
+    assert len(disagreements) == 1
+    candidate = disagreements[0]
+    assert candidate["context_before"].endswith("water from root to")
+    assert candidate["context_after"] == ""
+    assert candidate["candidates"] == ["scion", "scler", "stem"]
+    assert [item["reading"] for item in candidate["observations"]] == [
+        "scion",
+        "scler",
+        "stem",
+    ]
+
+
+def test_multiple_candidate_spans_remain_separate() -> None:
+    disagreements, _normalized = _disagreements(
+        _variance(
+            ["Splice grafting is useful for scion plants"],
+            ["Sapia grafting is useful for scler plants"],
+            ["Splay grafting is useful for stem plants"],
+            ["Sapling grafting is useful for scion plants"],
+        )
+    )
+
+    assert len(disagreements) == 2
+    assert disagreements[0]["candidates"] == ["Splice", "Sapia", "Splay", "Sapling"]
+    assert disagreements[1]["candidates"] == ["scion", "scler", "stem"]
+    assert disagreements[0]["context_after"].startswith("grafting is useful")
+    assert disagreements[1]["context_before"].endswith("for")
+
+
 def test_disagreement_localizes_once_crops_source_and_rereads(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
@@ -140,7 +227,11 @@ def test_disagreement_localizes_once_crops_source_and_rereads(
     assert disagreement["crop"]["coordinate_space"] == "source"
     assert disagreement["crop"]["width"] == 22
     assert disagreement["crop"]["height"] == 22
-    assert Path(disagreement["crop"]["path"]).exists()
+    crop_path = Path(disagreement["crop"]["path"])
+    assert crop_path.exists()
+    with Image.open(crop_path) as crop:
+        assert crop.mode == "RGB"
+        assert crop.getpixel((0, 0)) == (12, 34, 56)
     assert len(FakeRereader.instances) == 1
     assert len(FakeRereader.instances[0].calls) == 2
     assert disagreement["rereads"][0]["raw_response"] == {
