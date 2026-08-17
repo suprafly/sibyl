@@ -5,6 +5,7 @@ from typing import Any
 from PIL import Image
 
 from sibyl.experiments import boox_recognition as experiment
+from sibyl.experiments.qwen_recognition_knobs import extract_recognition_text
 
 
 def _stroke(identifier: str, order: int, x: float, y: float) -> dict[str, Any]:
@@ -66,6 +67,39 @@ def test_condition_selection_is_canonical_and_rejects_unknown_values() -> None:
         raise AssertionError("duplicate conditions should be rejected")
 
 
+def test_qwen_response_extraction_prefers_content_and_falls_back_to_thinking() -> None:
+    assert (
+        extract_recognition_text(
+            {"message": {"content": "on the water from root to"}}
+        )
+        == "on the water from root to"
+    )
+    assert (
+        extract_recognition_text(
+            {"message": {"thinking": "on the water from root to"}}
+        )
+        == "on the water from root to"
+    )
+    assert (
+        extract_recognition_text(
+            {
+                "message": {
+                    "content": "returned transcription",
+                    "thinking": "reasoning containing another transcription",
+                }
+            }
+        )
+        == "returned transcription"
+    )
+    assert (
+        extract_recognition_text(
+            {"message": {"content": "", "thinking": "usable thinking transcription"}}
+        )
+        == "usable thinking transcription"
+    )
+    assert extract_recognition_text({"message": {"content": "", "thinking": ""}}) is None
+
+
 class FakeReader:
     model = "qwen-test"
 
@@ -79,7 +113,12 @@ class FakeReader:
     ) -> tuple[dict[str, Any], float]:
         self.prompts.append(prompt)
         self.image_counts.append(len(images))
-        raw = {"message": {"content": '{"text": "candidate"}'}}
+        raw = {
+            "message": {
+                "content": '{"text": "candidate"}',
+                "thinking": "reasoning preserved separately",
+            }
+        }
         self.observer(raw)
         return {"status": "ok", "text": "candidate", "raw_response": raw}, 0.0
 
@@ -176,6 +215,14 @@ def test_run_preserves_conditions_provenance_and_nonleaking_review(
     assert artifact["results"][2]["reference_stroke_ids"] == ["reference-stroke"]
     assert "answer" not in artifact["results"][2]["prompt"]
     assert artifact["results"][2]["analysis"]["evaluation"]["ground_truth"] == "answer"
+    assert (
+        artifact["results"][0]["analysis"]["parsed_responses"][0]["thinking"]
+        == "reasoning preserved separately"
+    )
+    assert (
+        artifact["results"][0]["analysis"]["runs"][0]["raw_response"]["message"]["thinking"]
+        == "reasoning preserved separately"
+    )
     assert all(result["raw_response_observed"] for result in artifact["results"])
     assert artifact["status"] == "complete"
     assert len(artifact["completed_results"]) == 5

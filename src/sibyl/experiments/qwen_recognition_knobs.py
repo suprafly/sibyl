@@ -21,7 +21,6 @@ from sibyl.experiments.handwriting_preprocess import _targets, evaluate_candidat
 from sibyl.experiments.transcription_reread import (
     REGIONAL_PROMPT,
     REGIONAL_SCHEMA,
-    _message_json,
 )
 from sibyl.transform import DEFAULT_OLLAMA_URL, DEFAULT_QWEN_MODEL
 
@@ -151,9 +150,6 @@ class OllamaKnobReader:
 
 def extract_recognition_text(body: dict[str, Any]) -> str | None:
     """Extract recognition text in Sibyl's established content/thinking order."""
-    parsed = _message_json(body)
-    if isinstance(parsed, dict) and isinstance(parsed.get("text"), str):
-        return cast(str, parsed["text"])
     message = body.get("message")
     if not isinstance(message, dict):
         return None
@@ -161,6 +157,13 @@ def extract_recognition_text(body: dict[str, Any]) -> str | None:
         candidate = message.get(field)
         if isinstance(candidate, dict) and isinstance(candidate.get("text"), str):
             return cast(str, candidate["text"])
+        if isinstance(candidate, str) and candidate.strip():
+            try:
+                parsed = json.loads(candidate)
+            except json.JSONDecodeError:
+                return candidate
+            if isinstance(parsed, dict) and isinstance(parsed.get("text"), str):
+                return cast(str, parsed["text"])
     return None
 
 

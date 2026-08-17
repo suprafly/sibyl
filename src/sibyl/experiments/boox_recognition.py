@@ -486,6 +486,14 @@ def run_boox_recognition(
                         "run": item["run"],
                         "status": item["status"],
                         "reading": item.get("reading"),
+                        "thinking": (
+                            item.get("raw_response", {})
+                            .get("message", {})
+                            .get("thinking")
+                            if isinstance(item.get("raw_response"), dict)
+                            and isinstance(item["raw_response"].get("message"), dict)
+                            else None
+                        ),
                     }
                     for item in analysis["runs"]
                 ]
