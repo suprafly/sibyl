@@ -20,7 +20,10 @@ from sibyl.experiments.handwriting_exemplars import (
     _read_configuration,
 )
 from sibyl.experiments.handwriting_preprocess import _targets, evaluate_candidate
-from sibyl.experiments.qwen_recognition_knobs import DEFAULT_NUM_PREDICT, ISOLATED_PROMPT
+from sibyl.experiments.qwen_recognition_knobs import (
+    ISOLATED_PROMPT,
+    extract_recognition_text,
+)
 from sibyl.transform import DEFAULT_QWEN_MODEL
 
 DEFAULT_NOTE = Path("samples/Grafting 101.note")
@@ -29,6 +32,7 @@ DEFAULT_OUTPUT = Path(".sibyl/experiments/boox-recognition.json")
 DEFAULT_REREAD = Path(".sibyl/experiments/transcription-reread.json")
 DEFAULT_COMPARE = Path(".sibyl/experiments/trocr-compare.json")
 DEFAULT_RUNS = 5
+BOOX_RECOGNITION_NUM_PREDICT = 1024
 PAGE = 4
 NATIVE_SIZE = (1404, 1872)
 CONDITIONS = (
@@ -284,6 +288,34 @@ def _condition_analysis(analysis: dict[str, Any]) -> dict[str, Any]:
     }
 
 
+def _truncated_thinking_evidence(raw_response: Any) -> str | None:
+    """Extract truncated thinking for analysis without making it a reading."""
+    if not isinstance(raw_response, dict):
+        return None
+    message = raw_response.get("message")
+    if not isinstance(message, dict):
+        return None
+    thinking = message.get("thinking")
+    if not thinking:
+        return None
+    return extract_recognition_text({"message": {"content": "", "thinking": thinking}})
+
+
+def _add_truncated_evidence(analysis: dict[str, Any]) -> dict[str, Any]:
+    evidence: list[str] = []
+    for item in analysis["runs"]:
+        value = (
+            _truncated_thinking_evidence(item.get("raw_response"))
+            if item.get("status") == "truncated_response"
+            else None
+        )
+        if value is not None:
+            item["truncated_evidence"] = value
+            evidence.append(value)
+    analysis["truncated_evidence"] = evidence
+    return analysis
+
+
 def _verified_page(note_path: Path) -> dict[str, Any]:
     with tempfile.TemporaryDirectory(prefix="sibyl-boox-recognition-") as directory:
         result = inspect_boox_strokes(note_path, page=PAGE, output=Path(directory) / "page")
@@ -311,6 +343,7 @@ def run_boox_recognition(
     regions: str | None = None,
     lines: str | None = None,
     runs: int = DEFAULT_RUNS,
+    num_predict: int = BOOX_RECOGNITION_NUM_PREDICT,
     conditions: str | None = None,
     review_path: Path | None = None,
     output_path: Path = DEFAULT_OUTPUT,
@@ -320,6 +353,8 @@ def run_boox_recognition(
 ) -> dict[str, Any]:
     if runs <= 0:
         raise ValueError("runs must be positive")
+    if num_predict <= 0:
+        raise ValueError("num_predict must be positive")
     requested_conditions = selected_conditions(conditions)
     if not image_path.is_file():
         raise FileNotFoundError(f"Image not found: {image_path}")
@@ -373,7 +408,7 @@ def run_boox_recognition(
         "temperature": "unspecified (Ollama/model default)",
         "top_p": "unspecified (Ollama/model default)",
         "seed": "unspecified (Ollama/model default)",
-        "num_predict": DEFAULT_NUM_PREDICT,
+        "num_predict": num_predict,
         "think": False,
         "stream": False,
         "keep_alive": 0,
@@ -481,6 +516,7 @@ def run_boox_recognition(
                 analysis = _condition_analysis(
                     _read_configuration(reader, images, prompt, controls, runs)
                 )
+                _add_truncated_evidence(analysis)
                 analysis["parsed_responses"] = [
                     {
                         "run": item["run"],
@@ -494,6 +530,7 @@ def run_boox_recognition(
                             and isinstance(item["raw_response"].get("message"), dict)
                             else None
                         ),
+                        "truncated_evidence": item.get("truncated_evidence"),
                     }
                     for item in analysis["runs"]
                 ]

@@ -11,6 +11,11 @@ from pathlib import Path
 from sibyl import __version__
 from sibyl.corpus import format_corpus_result, prepare_boox_corpus
 from sibyl.experiments.boox_recognition import (
+    BOOX_RECOGNITION_NUM_PREDICT,
+    format_boox_recognition,
+    run_boox_recognition,
+)
+from sibyl.experiments.boox_recognition import (
     DEFAULT_IMAGE as BOOX_RECOGNITION_DEFAULT_IMAGE,
 )
 from sibyl.experiments.boox_recognition import (
@@ -21,10 +26,6 @@ from sibyl.experiments.boox_recognition import (
 )
 from sibyl.experiments.boox_recognition import (
     DEFAULT_RUNS as BOOX_RECOGNITION_DEFAULT_RUNS,
-)
-from sibyl.experiments.boox_recognition import (
-    format_boox_recognition,
-    run_boox_recognition,
 )
 from sibyl.experiments.boox_strokes import (
     DEFAULT_NOTE as BOOX_STROKES_DEFAULT_NOTE,
@@ -250,6 +251,12 @@ def build_parser() -> argparse.ArgumentParser:
     )
     boox_recognition.add_argument(
         "--runs", type=int, default=BOOX_RECOGNITION_DEFAULT_RUNS, help="reads per condition"
+    )
+    boox_recognition.add_argument(
+        "--num-predict",
+        type=int,
+        default=BOOX_RECOGNITION_NUM_PREDICT,
+        help="maximum output tokens per read",
     )
     boox_recognition.add_argument(
         "--conditions",
@@ -498,6 +505,7 @@ def main(argv: Sequence[str] | None = None) -> int:
                 regions=arguments.regions,
                 lines=arguments.lines,
                 runs=arguments.runs,
+                num_predict=arguments.num_predict,
                 conditions=arguments.conditions,
                 review_path=arguments.review,
                 output_path=arguments.output,

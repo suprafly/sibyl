@@ -13,9 +13,15 @@ file and are applied after recognition for evaluation.
 The experiment uses the verified page-4 BOOX decode: 167 strokes, 17,272
 points, 1404×1872 native dimensions, identity coordinates, and verified
 stroke/point associations. It reuses the existing Qwen adapter and fixed
-recognition controls, repeating each condition for the requested number of
-reads while preserving raw and parsed responses, failures, prompts, controls,
-candidate distributions, and stability.
+recognition controls, with an experiment-only default `num_predict` budget of
+1024 (override with `--num-predict N`). This does not change canonical Sibyl
+recognition. Each condition is repeated for the requested number of reads while
+preserving raw and parsed responses, failures, prompts, controls, candidate
+distributions, and stability.
+
+Responses with `done_reason: "length"` remain `truncated_response`. If the
+returned content is empty, usable thinking is preserved as
+`truncated_evidence` for analysis, but is not counted as a confirmed reading.
 
 The conditions are:
 

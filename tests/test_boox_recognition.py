@@ -5,6 +5,7 @@ from typing import Any
 from PIL import Image
 
 from sibyl.experiments import boox_recognition as experiment
+from sibyl.experiments import handwriting_exemplars
 from sibyl.experiments.qwen_recognition_knobs import extract_recognition_text
 
 
@@ -98,6 +99,34 @@ def test_qwen_response_extraction_prefers_content_and_falls_back_to_thinking() -
         == "usable thinking transcription"
     )
     assert extract_recognition_text({"message": {"content": "", "thinking": ""}}) is None
+
+
+def test_truncated_empty_content_preserves_thinking_as_unconfirmed_evidence(
+    monkeypatch: Any,
+) -> None:
+    raw = {
+        "done_reason": "length",
+        "eval_count": 256,
+        "message": {"content": "", "thinking": "on water from root to"},
+    }
+    monkeypatch.setattr(handwriting_exemplars, "_query", lambda **_: (raw, 1.0))
+    reader = handwriting_exemplars.OllamaExemplarReader(model="qwen-test")
+    result, _ = reader.read([Image.new("RGB", (4, 4), "white")], "prompt", {"num_predict": 1024})
+    assert result["status"] == "truncated_response"
+    assert result["text"] == "on water from root to"
+    analysis = handwriting_exemplars._read_configuration(
+        reader,
+        [Image.new("RGB", (4, 4), "white")],
+        "prompt",
+        {"num_predict": 1024},
+        1,
+    )
+    assert analysis["readings"] == []
+    assert analysis["runs"][0]["status"] == "truncated_response"
+    boox_analysis = experiment._condition_analysis(analysis)
+    experiment._add_truncated_evidence(boox_analysis)
+    assert boox_analysis["truncated_evidence"] == ["on water from root to"]
+    assert boox_analysis["stable_reading"] is None
 
 
 class FakeReader:
@@ -212,6 +241,7 @@ def test_run_preserves_conditions_provenance_and_nonleaking_review(
         "leave-one-region-out",
     ]
     assert artifact["results"][0]["image_order"] == ["line-target"]
+    assert artifact["request_controls"]["num_predict"] == 1024
     assert artifact["results"][2]["reference_stroke_ids"] == ["reference-stroke"]
     assert "answer" not in artifact["results"][2]["prompt"]
     assert artifact["results"][2]["analysis"]["evaluation"]["ground_truth"] == "answer"

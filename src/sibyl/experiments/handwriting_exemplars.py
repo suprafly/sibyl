@@ -94,6 +94,12 @@ def _query(
     try:
         with urllib.request.urlopen(request, timeout=300) as response:
             body = json.load(response)
+    except urllib.error.HTTPError as error:
+        details = error.read().decode("utf-8", errors="replace").strip()
+        suffix = f": {details}" if details else ""
+        raise RuntimeError(
+            f"Unable to query Ollama/Qwen ({model}); HTTP {error.code}{suffix}"
+        ) from error
     except (urllib.error.URLError, TimeoutError, json.JSONDecodeError) as error:
         raise RuntimeError(f"Unable to query Ollama/Qwen ({model}): {error}") from error
     if not isinstance(body, dict):
