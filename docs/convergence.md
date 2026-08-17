@@ -3,10 +3,12 @@
 Sibyl’s experimental evidence path is:
 
 ```text
-OBSERVE → PRESERVE → COMPARE → CONVERGE → PROJECT
+OBSERVE → PRESERVE → COMPARE → REGIONAL CONVERGENCE → DOCUMENT CONVERGENCE → PROJECT
 ```
 
-`converge` consumes the preserved `.sibyl/experiments/trocr-compare.json` artifact. It does not call Qwen, TrOCR, another LLM, or any other recognizer. It compares repeated readings deterministically, normalizes presentation-only differences, clusters close lexical variants, extracts common token phrases, and emits a candidate Markdown projection plus JSON provenance. Model agreement is evidence, not truth: stable model output can still be wrong, and disagreement remains `[unclear]` unless the evidence is compatible or a human explicitly reviews it.
+`converge` consumes the preserved `.sibyl/experiments/trocr-compare.json` artifact. It does not call Qwen, TrOCR, another LLM, or any other recognizer. Regional convergence compares repeated readings deterministically, normalizes presentation-only differences, clusters close lexical variants, and extracts common token phrases. A second document pass then uses spatial order, observed alternatives, page-level observations when available, and local continuity to choose among already-supported candidates. Model agreement is evidence, not truth: stable model output can still be wrong, and disagreement remains `[unclear]` unless the evidence is compatible or a human explicitly reviews it.
+
+Every emitted lexical token must have an evidence path to a regional recognition observation, an available page-level observation, or explicit human review. Document context can select among observed alternatives or extend a supported phrase with observed page-level material; it cannot invent vocabulary. A document is not merely a bag of independently recognized regions, so the JSON preserves both the regional candidate and the document-level decision and scoring basis.
 
 The JSON distinguishes model observations, recognizer stability, cross-model token overlap, common phrases, the candidate transcription, unresolved disagreements, source crop hashes, and human confirmation. A canonical page artifact, when discoverable beside the input source, is recorded as a page-level observation and may supply existing figure references; it is not silently promoted to ground truth.
 

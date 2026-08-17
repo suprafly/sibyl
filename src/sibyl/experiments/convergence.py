@@ -383,6 +383,263 @@ def _canonical_observation(
     }, refs
 
 
+def _source_bbox(region: dict[str, Any]) -> dict[str, Any]:
+    value = region.get("source_crop", {}).get("source_bbox", {})
+    return value if isinstance(value, dict) else {}
+
+
+def _document_order(regions: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    return sorted(
+        regions,
+        key=lambda region: (
+            _source_bbox(region).get("top", 0),
+            _source_bbox(region).get("left", 0),
+            region["region_id"],
+        ),
+    )
+
+
+def _candidate_tokens(candidate: str) -> list[str]:
+    return [token for token in _tokenize(candidate) if token != "[unclear]"]
+
+
+def _same_line(first: dict[str, Any], second: dict[str, Any]) -> bool:
+    left = _source_bbox(first)
+    right = _source_bbox(second)
+    try:
+        first_top, first_bottom = float(left["top"]), float(left["bottom"])
+        second_top, second_bottom = float(right["top"]), float(right["bottom"])
+        first_height = max(1.0, first_bottom - first_top)
+        second_height = max(1.0, second_bottom - second_top)
+    except (KeyError, TypeError, ValueError):
+        return False
+    overlap = min(first_bottom, second_bottom) - max(first_top, second_top)
+    return overlap >= 0.5 * min(first_height, second_height)
+
+
+def _continuity_support(candidate: str, neighbors: list[str]) -> int:
+    candidate_tokens = _candidate_tokens(candidate)
+    score = 0
+    for neighbor in neighbors:
+        neighbor_tokens = _candidate_tokens(neighbor)
+        score += sum(
+            1
+            for left, right in zip(candidate_tokens, neighbor_tokens, strict=False)
+            if _token_similarity(left, right) >= 0.7 and left.isalnum() and right.isalnum()
+        )
+    return score
+
+
+def _page_extensions(candidate: str, page_lines: list[str]) -> list[str]:
+    source = _tokenize(candidate)
+    if len(source) < 2:
+        return []
+    extensions: list[str] = []
+    for line in page_lines:
+        page = _tokenize(line)
+        best: tuple[int, int] | None = None
+        for source_start in range(len(source) - 1):
+            suffix = source[source_start:]
+            for page_start in range(len(page) - len(suffix) + 1):
+                matched = sum(
+                    _token_similarity(left, right) >= 0.7
+                    for left, right in zip(suffix, page[page_start:], strict=False)
+                )
+                if (
+                    matched == len(suffix)
+                    and page_start + len(suffix) < len(page)
+                    and (best is None or len(suffix) > best[0])
+                ):
+                    best = (len(suffix), page_start + len(suffix))
+        if best is not None:
+            extensions.append(_detokenize(source + page[best[1] :]))
+    return extensions
+
+
+def _score_document_candidate(
+    region: dict[str, Any],
+    candidate: str,
+    *,
+    selected_neighbors: list[str],
+    page_lines: list[str],
+) -> dict[str, Any]:
+    normalized_candidate = normalize_reading(candidate)
+    observations = region["observations"]
+    qwen = [normalize_reading(item["text"]) for item in observations["qwen"]]
+    trocr = [normalize_reading(item["text"]) for item in observations["trocr"]]
+    recognition = [
+        name
+        for name, values in (("qwen", qwen), ("trocr", trocr))
+        if normalized_candidate in values
+    ]
+    cross_model = [
+        match
+        for match in region.get("evidence", {}).get("cross_model_overlap", [])
+        if match.get("qwen_token") in _candidate_tokens(candidate)
+        or match.get("trocr_token") in _candidate_tokens(candidate)
+    ]
+    local_stability = []
+    for name in ("qwen_stability", "trocr_stability"):
+        stability = region.get("evidence", {}).get(name, {})
+        if normalized_candidate == stability.get("text"):
+            local_stability.append(name)
+    page_support = [line for line in page_lines if normalize_reading(line) == normalized_candidate]
+    page_token_support = max(
+        (
+            sum(
+                any(_token_similarity(token, page_token) >= 0.7 for page_token in _tokenize(line))
+                for token in _candidate_tokens(candidate)
+            )
+            for line in page_lines
+        ),
+        default=0,
+    )
+    continuity = _continuity_support(candidate, selected_neighbors)
+    observed_tokens = {
+        token.lower()
+        for value in qwen + trocr
+        for token in _candidate_tokens(value)
+        if token.isalnum()
+    }
+    page_tokens = {
+        token.lower()
+        for value in page_lines
+        for token in _candidate_tokens(value)
+        if token.isalnum()
+    }
+    unsupported = [
+        token
+        for token in _candidate_tokens(candidate)
+        if token.isalnum() and token.lower() not in observed_tokens | page_tokens
+    ]
+    score = (
+        len(recognition)
+        + len(cross_model)
+        + len(local_stability)
+        + 3 * continuity
+        + 4 * len(page_support)
+        + 3 * page_token_support
+        - 3 * len(unsupported)
+    )
+    return {
+        "score": score,
+        "basis": {
+            "recognition_support": recognition,
+            "cross_model_support": cross_model,
+            "local_stability": local_stability,
+            "lexical_continuity": continuity,
+            "spatial_continuity": [],
+            "page_level_support": page_support,
+            "page_level_token_support": page_token_support,
+            "conflicts": unsupported,
+        },
+    }
+
+
+def _document_convergence(
+    regions: list[dict[str, Any]], page_lines: list[str]
+) -> tuple[list[dict[str, Any]], list[str]]:
+    ordered = _document_order(regions)
+    selected: list[str] = []
+    decisions: list[dict[str, Any]] = []
+    for region in ordered:
+        alternatives = list(dict.fromkeys([region["candidate"], *region.get("alternatives", [])]))
+        regional_first_tokens = [
+            tokens[0]
+            for candidate in alternatives
+            if (tokens := _candidate_tokens(candidate)) and tokens[0].isalnum()
+        ]
+        regional_tokens = {
+            token.lower()
+            for candidate in alternatives
+            for token in _candidate_tokens(candidate)
+            if token.isalnum()
+        }
+        max_regional_length = max(
+            (len(_candidate_tokens(candidate)) for candidate in alternatives), default=0
+        )
+        for line in page_lines:
+            page_tokens = [token for token in _candidate_tokens(line) if token.isalnum()]
+            overlap = sum(
+                1
+                for token in page_tokens
+                if token.lower() in regional_tokens
+                or any(_token_similarity(token, other) >= 0.7 for other in regional_tokens)
+            )
+            comparable_length = min(len(page_tokens), max_regional_length)
+            first_token_matches = bool(page_tokens) and any(
+                _token_similarity(page_tokens[0], token) >= 0.7 for token in regional_first_tokens
+            )
+            if overlap >= 3 and overlap * 10 >= 6 * comparable_length and first_token_matches:
+                alternatives.append(line)
+        alternatives.extend(
+            extension
+            for candidate in alternatives
+            for extension in _page_extensions(candidate, page_lines)
+        )
+        alternatives = list(dict.fromkeys(alternatives))
+        alternatives = [candidate for candidate in alternatives if isinstance(candidate, str)]
+        neighboring = selected[-2:]
+        scores = [
+            {
+                "candidate": candidate,
+                **_score_document_candidate(
+                    region,
+                    candidate,
+                    selected_neighbors=neighboring,
+                    page_lines=page_lines,
+                ),
+            }
+            for candidate in alternatives
+        ]
+        human_confirmed = bool(region.get("human_confirmed"))
+        if human_confirmed:
+            chosen = region["candidate"]
+            chosen_score = next(item for item in scores if item["candidate"] == chosen)
+        else:
+            viable = [
+                item
+                for item in scores
+                if item["candidate"] != "[unclear]"
+                and not item["basis"]["conflicts"]
+                and (
+                    item["candidate"] == region["candidate"]
+                    or item["basis"]["cross_model_support"]
+                    or item["basis"]["page_level_support"]
+                    or item["basis"]["page_level_token_support"] >= 2
+                    or item["basis"]["lexical_continuity"]
+                )
+            ]
+            chosen_score = (
+                max(
+                    viable, key=lambda item: (item["score"], -alternatives.index(item["candidate"]))
+                )
+                if viable
+                else next(item for item in scores if item["candidate"] == "[unclear]")
+            )
+            chosen = chosen_score["candidate"]
+        selected.append(chosen)
+        decisions.append(
+            {
+                "region_id": region["region_id"],
+                "regional_candidate": region["candidate"],
+                "alternatives": alternatives,
+                "selected": chosen,
+                "score": chosen_score["score"],
+                "basis": chosen_score["basis"],
+                "human_confirmed": human_confirmed,
+                "source_crop": region["source_crop"],
+            }
+        )
+    blocks: list[str] = []
+    for index, decision in enumerate(decisions):
+        if index and _same_line(ordered[index - 1], ordered[index]):
+            blocks[-1] = f"{blocks[-1]} {decision['selected']}".strip()
+        else:
+            blocks.append(decision["selected"])
+    return decisions, blocks
+
+
 def run_convergence(
     input_path: Path,
     *,
@@ -402,6 +659,7 @@ def run_convergence(
         regions,
         key=lambda region: (
             region.get("crop", {}).get("source_bbox", {}).get("top", 0),
+            region.get("crop", {}).get("source_bbox", {}).get("left", 0),
             region["region_id"],
         ),
     )
@@ -409,6 +667,16 @@ def run_convergence(
     for region in ordered:
         region_id = region["region_id"]
         result = _candidate(region, review.get(region_id))
+        result["alternatives"] = list(
+            dict.fromkeys(
+                [
+                    normalize_reading(item.get("text", ""))
+                    for name in ("qwen", "trocr")
+                    for item in _successful(region.get(name))
+                ]
+                + [result["candidate"]]
+            )
+        )
         converged.append(
             {
                 "region_id": region_id,
@@ -438,7 +706,10 @@ def run_convergence(
             }
         )
     canonical, figures = _canonical_observation(input_path, artifact.get("source"))
-    text_blocks = [region["candidate"] for region in converged]
+    page_lines = []
+    if isinstance(canonical, dict) and isinstance(canonical.get("page_text"), list):
+        page_lines = [line for line in canonical["page_text"] if isinstance(line, str)]
+    document_regions, text_blocks = _document_convergence(converged, page_lines)
     markdown = "\n\n".join(text_blocks + figures) + "\n"
     output = {
         "experiment": "convergence",
@@ -447,6 +718,11 @@ def run_convergence(
         "source": artifact.get("source"),
         "canonical_page_observation": canonical,
         "regions": converged,
+        "document_candidate": {
+            "regions": [item["selected"] for item in document_regions],
+            "figures": figures,
+        },
+        "document_convergence": {"regions": document_regions, "blocks": text_blocks},
         "figures": figures,
         "output": {"markdown": str(markdown_path), "json": str(json_path)},
     }

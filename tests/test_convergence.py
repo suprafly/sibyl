@@ -102,6 +102,71 @@ def test_incompatible_readings_remain_unclear_and_output_is_deterministic(tmp_pa
     assert "alpha" not in Path("src/sibyl/experiments/convergence.py").read_text()
 
 
+def test_document_pass_preserves_regional_layer_and_exposes_scoring(tmp_path: Path) -> None:
+    input_path = artifact(tmp_path, qwen=["transpirs food"], trocr=["transports food"])
+    result = run_convergence(
+        input_path, markdown_path=tmp_path / "out.md", json_path=tmp_path / "out.json"
+    )
+    regional = result["regions"][0]
+    document = result["document_convergence"]["regions"][0]
+    assert regional["candidate"]
+    assert document["regional_candidate"] == regional["candidate"]
+    assert "recognition_support" in document["basis"]
+    assert result["document_candidate"]["regions"] == [document["selected"]]
+
+
+def test_document_pass_orders_spatially_and_joins_same_line_regions(tmp_path: Path) -> None:
+    input_path = artifact(
+        tmp_path, qwen=["we will do now", "what"], trocr=["we will do now", "what"]
+    )
+    payload = json.loads(input_path.read_text())
+    payload["regions"][0]["crop"]["source_bbox"] = {
+        "left": 200,
+        "top": 10,
+        "right": 400,
+        "bottom": 100,
+    }
+    payload["regions"][1]["crop"]["source_bbox"] = {
+        "left": 10,
+        "top": 10,
+        "right": 190,
+        "bottom": 100,
+    }
+    input_path.write_text(json.dumps(payload), encoding="utf-8")
+    result = run_convergence(
+        input_path, markdown_path=tmp_path / "out.md", json_path=tmp_path / "out.json"
+    )
+    assert result["document_convergence"]["regions"][0]["region_id"] == "region-02"
+    assert result["document_convergence"]["blocks"] == ["what we will do now"]
+
+
+def test_unrelated_regions_are_not_joined(tmp_path: Path) -> None:
+    input_path = artifact(tmp_path, qwen=["heading", "paragraph"], trocr=["heading", "paragraph"])
+    result = run_convergence(
+        input_path, markdown_path=tmp_path / "out.md", json_path=tmp_path / "out.json"
+    )
+    assert len(result["document_convergence"]["blocks"]) == 2
+
+
+def test_document_review_is_authoritative_but_model_evidence_remains(tmp_path: Path) -> None:
+    input_path = artifact(tmp_path, qwen=["uncertain"], trocr=["other"])
+    review = tmp_path / "review.yaml"
+    review.write_text(
+        'regions:\n  region-01:\n    text: "Human reading"\n    confirmed: true\n',
+        encoding="utf-8",
+    )
+    result = run_convergence(
+        input_path,
+        review_path=review,
+        markdown_path=tmp_path / "out.md",
+        json_path=tmp_path / "out.json",
+    )
+    decision = result["document_convergence"]["regions"][0]
+    assert decision["selected"] == "Human reading"
+    assert decision["human_confirmed"] is True
+    assert result["regions"][0]["observations"]["qwen"][0]["text"] == "uncertain"
+
+
 def test_human_review_overrides_ambiguity_and_is_traceable(tmp_path: Path) -> None:
     input_path = artifact(tmp_path, qwen=["uncertain"], trocr=["other"])
     review = tmp_path / "review.yaml"
