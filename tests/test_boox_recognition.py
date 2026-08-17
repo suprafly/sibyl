@@ -53,6 +53,19 @@ def test_native_rendering_and_evaluation_are_deterministic(tmp_path: Path) -> No
     }
 
 
+def test_condition_selection_is_canonical_and_rejects_unknown_values() -> None:
+    assert experiment.selected_conditions("leave-one-region-out,baseline") == (
+        "baseline",
+        "leave-one-region-out",
+    )
+    try:
+        experiment.selected_conditions("baseline,baseline")
+    except ValueError as error:
+        assert "duplicates" in str(error)
+    else:
+        raise AssertionError("duplicate conditions should be rejected")
+
+
 class FakeReader:
     model = "qwen-test"
 
@@ -164,4 +177,6 @@ def test_run_preserves_conditions_provenance_and_nonleaking_review(
     assert "answer" not in artifact["results"][2]["prompt"]
     assert artifact["results"][2]["analysis"]["evaluation"]["ground_truth"] == "answer"
     assert all(result["raw_response_observed"] for result in artifact["results"])
+    assert artifact["status"] == "complete"
+    assert len(artifact["completed_results"]) == 5
     assert json.loads((tmp_path / "artifact.json").read_text()) == artifact

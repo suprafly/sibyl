@@ -252,6 +252,10 @@ def build_parser() -> argparse.ArgumentParser:
         "--runs", type=int, default=BOOX_RECOGNITION_DEFAULT_RUNS, help="reads per condition"
     )
     boox_recognition.add_argument(
+        "--conditions",
+        help="comma-separated conditions (default: all five conditions)",
+    )
+    boox_recognition.add_argument(
         "--review", type=Path, help="confirmed evaluation-only review JSON/YAML"
     )
     boox_recognition.add_argument(
@@ -494,6 +498,7 @@ def main(argv: Sequence[str] | None = None) -> int:
                 regions=arguments.regions,
                 lines=arguments.lines,
                 runs=arguments.runs,
+                conditions=arguments.conditions,
                 review_path=arguments.review,
                 output_path=arguments.output,
             )

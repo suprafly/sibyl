@@ -47,6 +47,19 @@ uv run sibyl experiment boox-recognition \
   --runs 5
 ```
 
+For a quick smoke test, restrict both the target and conditions:
+
+```sh
+uv run sibyl experiment boox-recognition \
+  --lines region-02-line-03 \
+  --conditions baseline,leave-one-region-out \
+  --runs 1
+```
+
+The JSON artifact is checkpointed after each completed condition. An
+interrupted run remains marked `status: "running"` and preserves completed
+results; a finished run is marked `status: "complete"`.
+
 For evaluation, provide a separate confirmed review file:
 
 ```json

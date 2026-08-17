@@ -31,6 +31,13 @@ DEFAULT_COMPARE = Path(".sibyl/experiments/trocr-compare.json")
 DEFAULT_RUNS = 5
 PAGE = 4
 NATIVE_SIZE = (1404, 1872)
+CONDITIONS = (
+    "baseline",
+    "native-render",
+    "native-exemplar",
+    "multi-exemplar",
+    "leave-one-region-out",
+)
 CRITICAL_LINES = (
     "region-02-line-01",
     "region-02-line-02",
@@ -47,6 +54,21 @@ NATIVE_PROMPT = (
 )
 
 ReaderFactory = Callable[[Callable[[dict[str, Any]], None]], ExemplarReader]
+
+
+def selected_conditions(value: str | None) -> tuple[str, ...]:
+    """Return requested conditions in canonical order for reproducible runs."""
+    if value is None:
+        return CONDITIONS
+    requested = [item.strip() for item in value.split(",") if item.strip()]
+    if not requested:
+        raise ValueError("--conditions must contain at least one condition")
+    if len(set(requested)) != len(requested):
+        raise ValueError("--conditions must not contain duplicates")
+    unknown = sorted(set(requested) - set(CONDITIONS))
+    if unknown:
+        raise ValueError(f"unknown BOOX recognition conditions: {', '.join(unknown)}")
+    return tuple(condition for condition in CONDITIONS if condition in requested)
 
 
 def _sha256(path: Path) -> str:
@@ -289,6 +311,7 @@ def run_boox_recognition(
     regions: str | None = None,
     lines: str | None = None,
     runs: int = DEFAULT_RUNS,
+    conditions: str | None = None,
     review_path: Path | None = None,
     output_path: Path = DEFAULT_OUTPUT,
     reread_path: Path = DEFAULT_REREAD,
@@ -297,6 +320,7 @@ def run_boox_recognition(
 ) -> dict[str, Any]:
     if runs <= 0:
         raise ValueError("runs must be positive")
+    requested_conditions = selected_conditions(conditions)
     if not image_path.is_file():
         raise FileNotFoundError(f"Image not found: {image_path}")
     if not note_path.is_file():
@@ -336,6 +360,14 @@ def run_boox_recognition(
     review = _load_review(review_path)
     output_path.parent.mkdir(parents=True, exist_ok=True)
     generated = output_path.parent / "boox-recognition"
+
+    def checkpoint() -> None:
+        temporary = output_path.with_suffix(output_path.suffix + ".tmp")
+        temporary.write_text(
+            json.dumps(artifact, indent=2, sort_keys=True) + "\n", encoding="utf-8"
+        )
+        temporary.replace(output_path)
+
     controls = {
         "model": DEFAULT_QWEN_MODEL,
         "temperature": "unspecified (Ollama/model default)",
@@ -365,12 +397,16 @@ def run_boox_recognition(
             "associations": "verified",
         },
         "runs_requested": runs,
+        "conditions_requested": list(requested_conditions),
+        "status": "running",
+        "completed_results": [],
         "request_controls": controls,
         "targets": [],
         "evaluation_review": str(review_path) if review_path else None,
         "results": [],
         "output": str(output_path),
     }
+    checkpoint()
     strokes = native["strokes"]
     for target in targets:
         target_id = target["target_id"]
@@ -385,6 +421,7 @@ def run_boox_recognition(
             "native_bbox": target_native_bbox,
         }
         artifact["targets"].append(target_record)
+        checkpoint()
         other_lines = [
             line
             for line in catalog
@@ -400,7 +437,8 @@ def run_boox_recognition(
             "multi-exemplar": other_lines,
             "leave-one-region-out": other_lines,
         }
-        for condition, references in specs.items():
+        for condition in requested_conditions:
+            references = specs[condition]
             reference_records: list[dict[str, Any]] = []
             if condition == "baseline":
                 pass
@@ -491,7 +529,10 @@ def run_boox_recognition(
                     "analysis": analysis,
                 }
             )
-    output_path.write_text(json.dumps(artifact, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+            artifact["completed_results"].append(f"{target_id}:{condition}")
+            checkpoint()
+    artifact["status"] = "complete"
+    checkpoint()
     return cast(dict[str, Any], json.loads(output_path.read_text(encoding="utf-8")))
 
 
