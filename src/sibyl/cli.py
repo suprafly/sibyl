@@ -12,7 +12,6 @@ from sibyl import __version__
 from sibyl.corpus import format_corpus_result, prepare_boox_corpus
 from sibyl.experiments.boox_recognition import (
     BOOX_RECOGNITION_NUM_CTX,
-    BOOX_RECOGNITION_NUM_PREDICT,
     format_boox_recognition,
     run_boox_recognition,
 )
@@ -256,8 +255,8 @@ def build_parser() -> argparse.ArgumentParser:
     boox_recognition.add_argument(
         "--num-predict",
         type=int,
-        default=BOOX_RECOGNITION_NUM_PREDICT,
-        help="maximum output tokens per read",
+        default=None,
+        help="maximum output tokens per read (default: 2048 for recovery, 1024 for experiments)",
     )
     boox_recognition.add_argument(
         "--num-ctx",
@@ -268,8 +267,8 @@ def build_parser() -> argparse.ArgumentParser:
     boox_recognition.add_argument(
         "--native-stroke-width",
         type=int,
-        default=2,
-        help="rendered native-reference stroke width in native pixels",
+        default=None,
+        help="rendered native-reference stroke width (default: 6 for recovery, 2 for experiments)",
     )
     boox_recognition.add_argument(
         "--reference-height",
@@ -279,6 +278,11 @@ def build_parser() -> argparse.ArgumentParser:
     boox_recognition.add_argument(
         "--reference-lines",
         help="comma-separated non-target line IDs to use as references",
+    )
+    boox_recognition.add_argument(
+        "--markdown",
+        action="store_true",
+        help="recover the page with BOOX evidence and write recovery.md",
     )
     boox_recognition.add_argument(
         "--conditions",
@@ -533,6 +537,7 @@ def main(argv: Sequence[str] | None = None) -> int:
                 reference_height=arguments.reference_height,
                 reference_lines=arguments.reference_lines,
                 conditions=arguments.conditions,
+                markdown=arguments.markdown,
                 review_path=arguments.review,
                 output_path=arguments.output,
             )

@@ -99,3 +99,25 @@ uv run sibyl experiment boox-recognition \
   --num-ctx 8192 \
   --runs 3
 ```
+
+Page recovery is the note-aware projection of this experiment. Invoke it
+without line enumeration to discover all eligible line targets, select
+same-region references with structural target exclusion, and write
+`<image-stem>.sibyl/recovery.md` plus `recovery.json` evidence:
+
+```sh
+uv run sibyl experiment boox-recognition \
+  --note "samples/Grafting 101.note" \
+  --image samples/Grafting-101-page-004.png \
+  --native-stroke-width 6 \
+  --reference-height 64 \
+  --num-predict 2048 \
+  --num-ctx 8192 \
+  --runs 3 \
+  --markdown
+```
+
+Recovery selects only repeated evidence: exact agreement or a strict
+normalized majority. Otherwise it writes `⟦unresolved⟧` and preserves every
+candidate and raw run in `recovery.json`. The canonical `sibyl run --markdown`
+path remains image-only and writes `transform.md`.

@@ -34,6 +34,9 @@ DEFAULT_COMPARE = Path(".sibyl/experiments/trocr-compare.json")
 DEFAULT_RUNS = 5
 BOOX_RECOGNITION_NUM_PREDICT = 1024
 BOOX_RECOGNITION_NUM_CTX = 8192
+BOOX_RECOVERY_NUM_PREDICT = 2048
+BOOX_RECOVERY_STROKE_WIDTH = 6
+BOOX_RECOVERY_REFERENCE_HEIGHT = 64
 PAGE = 4
 NATIVE_SIZE = (1404, 1872)
 CONDITIONS = (
@@ -352,6 +355,106 @@ def _add_truncated_evidence(analysis: dict[str, Any]) -> dict[str, Any]:
     return analysis
 
 
+def _line_region(line: dict[str, Any]) -> str | None:
+    value = line.get("region_id")
+    if isinstance(value, str):
+        return value
+    identifier = line.get("reference_id") or line.get("target_id")
+    if isinstance(identifier, str) and "-line-" in identifier:
+        return identifier.split("-line-", 1)[0]
+    return None
+
+
+def _select_recovery_reading(analysis: dict[str, Any]) -> dict[str, Any]:
+    """Select only defensible repeated evidence; never use semantic plausibility."""
+    readings = [item for item in analysis["readings"] if isinstance(item, str)]
+    if len(readings) < 2:
+        return {
+            "status": "unresolved",
+            "reading": None,
+            "rule": "requires_multiple_successful_runs",
+            "reason": "fewer_than_two_successful_runs",
+            "candidates": readings,
+        }
+    if len(set(readings)) == 1:
+        return {
+            "status": "selected",
+            "reading": readings[0],
+            "rule": "exact_agreement",
+            "reason": "all_successful_runs_agree",
+            "candidates": readings,
+        }
+    normalized: dict[str, list[str]] = {}
+    for reading in readings:
+        key = " ".join(reading.casefold().split())
+        normalized.setdefault(key, []).append(reading)
+    ordered = sorted(normalized.items(), key=lambda item: (-len(item[1]), item[0]))
+    if ordered and len(ordered[0][1]) > len(readings) / 2:
+        return {
+            "status": "selected",
+            "reading": ordered[0][1][0],
+            "rule": "normalized_majority",
+            "reason": "strict_normalized_majority",
+            "candidates": readings,
+        }
+    return {
+        "status": "unresolved",
+        "reading": None,
+        "rule": "no_majority",
+        "reason": "successful_runs_disagree",
+        "candidates": readings,
+    }
+
+
+def _write_page_recovery(
+    artifact: dict[str, Any], image_path: Path
+) -> tuple[Path, Path]:
+    output_directory = image_path.parent / f"{image_path.stem}.sibyl"
+    output_directory.mkdir(parents=True, exist_ok=True)
+    selected_results: dict[str, dict[str, Any]] = {}
+    for result in artifact["results"]:
+        if result["condition"] == "leave-one-region-out":
+            selected_results[result["target"]["target_id"]] = _select_recovery_reading(
+                result["analysis"]
+            )
+    markdown_lines: list[str] = []
+    recovery_targets: list[dict[str, Any]] = []
+    for target in artifact["targets"]:
+        target_id = target["target_id"]
+        selection = selected_results.get(
+            target_id,
+            {
+                "status": "unresolved",
+                "reading": None,
+                "rule": "missing_recovery_condition",
+                "reason": "leave_one_region_out_result_missing",
+                "candidates": [],
+            },
+        )
+        markdown_lines.append(
+            selection["reading"] if selection["reading"] is not None else "⟦unresolved⟧"
+        )
+        recovery_targets.append({"target": target, "selection": selection})
+    recovery = {
+        "status": "complete",
+        "source": artifact["source"],
+        "source_sha256": artifact["source_sha256"],
+        "note": artifact["native_source"],
+        "targets": recovery_targets,
+        "selection_condition": "leave-one-region-out",
+        "markdown": str(output_directory / "recovery.md"),
+        "evidence": str(output_directory / "recovery.json"),
+    }
+    artifact["recovery"] = recovery
+    evidence_path = output_directory / "recovery.json"
+    evidence_path.write_text(
+        json.dumps(artifact, indent=2, sort_keys=True) + "\n", encoding="utf-8"
+    )
+    markdown_path = output_directory / "recovery.md"
+    markdown_path.write_text("\n\n".join(markdown_lines) + "\n", encoding="utf-8")
+    return markdown_path, evidence_path
+
+
 def _verified_page(note_path: Path) -> dict[str, Any]:
     with tempfile.TemporaryDirectory(prefix="sibyl-boox-recognition-") as directory:
         result = inspect_boox_strokes(note_path, page=PAGE, output=Path(directory) / "page")
@@ -379,9 +482,9 @@ def run_boox_recognition(
     regions: str | None = None,
     lines: str | None = None,
     runs: int = DEFAULT_RUNS,
-    num_predict: int = BOOX_RECOGNITION_NUM_PREDICT,
+    num_predict: int | None = None,
     num_ctx: int = BOOX_RECOGNITION_NUM_CTX,
-    native_stroke_width: int = 2,
+    native_stroke_width: int | None = None,
     reference_height: int | None = None,
     reference_lines: str | None = None,
     conditions: str | None = None,
@@ -390,42 +493,69 @@ def run_boox_recognition(
     reread_path: Path = DEFAULT_REREAD,
     compare_path: Path = DEFAULT_COMPARE,
     reader_factory: ReaderFactory | None = None,
+    markdown: bool = False,
 ) -> dict[str, Any]:
     if runs <= 0:
         raise ValueError("runs must be positive")
-    if num_predict <= 0:
-        raise ValueError("num_predict must be positive")
     if num_ctx <= 0:
         raise ValueError("num_ctx must be positive")
+    if markdown and conditions is None:
+        conditions = "leave-one-region-out"
+    if markdown and conditions is not None and "leave-one-region-out" not in conditions.split(","):
+        raise ValueError("--markdown recovery requires leave-one-region-out")
+    requested_conditions = selected_conditions(conditions)
+    if markdown:
+        if num_predict is None:
+            num_predict = BOOX_RECOVERY_NUM_PREDICT
+        if native_stroke_width is None:
+            native_stroke_width = BOOX_RECOVERY_STROKE_WIDTH
+        if reference_height is None:
+            reference_height = BOOX_RECOVERY_REFERENCE_HEIGHT
+    if num_predict is None:
+        num_predict = BOOX_RECOGNITION_NUM_PREDICT
+    if native_stroke_width is None:
+        native_stroke_width = 2
+    if num_predict <= 0:
+        raise ValueError("num_predict must be positive")
     if native_stroke_width <= 0:
         raise ValueError("native_stroke_width must be positive")
     if reference_height is not None and reference_height <= 0:
         raise ValueError("reference_height must be positive")
-    requested_conditions = selected_conditions(conditions)
     if not image_path.is_file():
         raise FileNotFoundError(f"Image not found: {image_path}")
     if not note_path.is_file():
         raise FileNotFoundError(f"Source file not found: {note_path}")
+    catalog = _line_catalog(reread_path, image_path)
     if lines is None and regions is None:
-        targets = _targets(
-            image_path,
-            regions=None,
-            lines=",".join(CRITICAL_LINES),
-            crop_path=None,
-            compare_path=compare_path,
-            reread_path=reread_path,
-        )
-        targets.extend(
-            _targets(
+        if markdown:
+            targets = _targets(
                 image_path,
-                regions="region-05",
-                lines=None,
+                regions=None,
+                lines=",".join(line["reference_id"] for line in catalog),
                 crop_path=None,
                 compare_path=compare_path,
                 reread_path=reread_path,
             )
-        )
-        targets = list({target["target_id"]: target for target in targets}.values())
+        else:
+            targets = _targets(
+                image_path,
+                regions=None,
+                lines=",".join(CRITICAL_LINES),
+                crop_path=None,
+                compare_path=compare_path,
+                reread_path=reread_path,
+            )
+            targets.extend(
+                _targets(
+                    image_path,
+                    regions="region-05",
+                    lines=None,
+                    crop_path=None,
+                    compare_path=compare_path,
+                    reread_path=reread_path,
+                )
+            )
+            targets = list({target["target_id"]: target for target in targets}.values())
     else:
         targets = _targets(
             image_path,
@@ -435,9 +565,13 @@ def run_boox_recognition(
             compare_path=compare_path,
             reread_path=reread_path,
         )
+    if markdown:
+        target_order = {
+            line["reference_id"]: index for index, line in enumerate(catalog)
+        }
+        targets.sort(key=lambda target: target_order.get(target["target_id"], len(catalog)))
     native = _verified_page(note_path)
     source_size = (Image.open(image_path).width, Image.open(image_path).height)
-    catalog = _line_catalog(reread_path, image_path)
     selected_reference_lines = _reference_lines(catalog, reference_lines)
     review = _load_review(review_path)
     output_path.parent.mkdir(parents=True, exist_ok=True)
@@ -493,6 +627,7 @@ def run_boox_recognition(
         "evaluation_review": str(review_path) if review_path else None,
         "results": [],
         "output": str(output_path),
+        "recovery_requested": markdown,
     }
     checkpoint()
     strokes = native["strokes"]
@@ -518,6 +653,27 @@ def run_boox_recognition(
             or (line["reference_id"] == target_id and target["kind"] != "line")
         ]
         other_lines = [line for line in other_lines if line["reference_id"] != target_id]
+        if markdown:
+            target_region = _line_region({"target_id": target_id})
+            other_lines = [
+                line for line in other_lines if _line_region(line) == target_region
+            ]
+            reference_selection = {
+                "policy": "same_region_excluding_target",
+                "target_region": target_region,
+                "eligible_reference_lines": [line["reference_id"] for line in other_lines],
+                "reason": (
+                    "same_region_references_selected"
+                    if other_lines
+                    else "insufficient_same_region_references"
+                ),
+            }
+        else:
+            reference_selection = {
+                "policy": "configured_experiment_references",
+                "eligible_reference_lines": [line["reference_id"] for line in other_lines],
+                "reason": "target_excluded_structurally",
+            }
         specs: dict[str, list[dict[str, Any]]] = {
             "baseline": [],
             "native-render": [{"reference_id": "page-004-native", "kind": "full-page"}],
@@ -633,6 +789,7 @@ def run_boox_recognition(
                             reference["reference_id"] for reference in references
                         ],
                     },
+                    "reference_selection": reference_selection,
                     "prompt_variant": (
                         "baseline" if condition == "baseline" else "native-style-exemplar"
                     ),
@@ -648,14 +805,20 @@ def run_boox_recognition(
             artifact["completed_results"].append(f"{target_id}:{condition}")
             checkpoint()
     artifact["status"] = "complete"
+    if markdown:
+        _write_page_recovery(artifact, image_path)
     checkpoint()
     return cast(dict[str, Any], json.loads(output_path.read_text(encoding="utf-8")))
 
 
 def format_boox_recognition(result: dict[str, Any]) -> str:
-    return (
+    lines = [
         f"experiment: {result['experiment']}\n"
         f"targets: {len(result['targets'])}\n"
         f"conditions: {len(result['results'])}\n"
         f"output: {result['output']}"
-    )
+    ]
+    recovery = result.get("recovery")
+    if isinstance(recovery, dict):
+        lines.extend([f"recovery: {recovery['markdown']}", f"evidence: {recovery['evidence']}"])
+    return "\n".join(lines)

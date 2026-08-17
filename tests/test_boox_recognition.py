@@ -137,6 +137,26 @@ def test_qwen_response_extraction_prefers_content_and_falls_back_to_thinking() -
     assert extract_recognition_text({"message": {"content": "", "thinking": ""}}) is None
 
 
+def test_recovery_selection_requires_agreement_and_preserves_candidates() -> None:
+    unresolved = experiment._select_recovery_reading(
+        {"readings": ["さくいお\uFF5E", "sclo~", "scio~"]}
+    )
+    assert unresolved == {
+        "status": "unresolved",
+        "reading": None,
+        "rule": "no_majority",
+        "reason": "successful_runs_disagree",
+        "candidates": ["さくいお\uFF5E", "sclo~", "scio~"],
+    }
+    selected = experiment._select_recovery_reading(
+        {"readings": ["sclio~", "scion", "scion"]}
+    )
+    assert selected["status"] == "selected"
+    assert selected["reading"] == "scion"
+    assert selected["rule"] == "normalized_majority"
+    assert selected["candidates"] == ["sclio~", "scion", "scion"]
+
+
 def test_truncated_empty_content_preserves_thinking_as_unconfirmed_evidence(
     monkeypatch: Any,
 ) -> None:
@@ -299,3 +319,108 @@ def test_run_preserves_conditions_provenance_and_nonleaking_review(
     assert artifact["status"] == "complete"
     assert len(artifact["completed_results"]) == 5
     assert json.loads((tmp_path / "artifact.json").read_text()) == artifact
+
+
+def test_markdown_recovery_enumerates_lines_and_writes_auditable_projection(
+    tmp_path: Path, monkeypatch: Any
+) -> None:
+    image_path = tmp_path / "page.png"
+    Image.new("RGB", (1404, 1872), "white").save(image_path)
+    note_path = tmp_path / "page.note"
+    note_path.write_bytes(b"note")
+    target_paths = {
+        identifier: tmp_path / f"{identifier}.png"
+        for identifier in (
+            "region-02-line-01",
+            "region-02-line-02",
+            "region-03-line-01",
+        )
+    }
+    for path in target_paths.values():
+        Image.new("RGB", (20, 20), "white").save(path)
+    boxes: dict[str, dict[str, int]] = {
+        identifier: {
+            "left": 10 + index * 30,
+            "top": 10,
+            "right": 30 + index * 30,
+            "bottom": 30,
+        }
+        for index, identifier in enumerate(target_paths)
+    }
+    targets: list[dict[str, Any]] = [
+        {
+            "target_id": identifier,
+            "kind": "line",
+            "path": path,
+            "source_bbox": boxes[identifier],
+        }
+        for identifier, path in target_paths.items()
+    ]
+    catalog: list[dict[str, Any]] = [
+        {
+            "reference_id": identifier,
+            "source_bbox": boxes[identifier],
+            "bbox": (
+                boxes[identifier]["left"],
+                boxes[identifier]["top"],
+                boxes[identifier]["right"],
+                boxes[identifier]["bottom"],
+            ),
+            "source_artifact": "reread.json",
+                "region_id": "region-02" if identifier.startswith("region-02") else "region-03",
+        }
+        for identifier in target_paths
+    ]
+    monkeypatch.setattr(experiment, "_targets", lambda *args, **kwargs: targets)
+    monkeypatch.setattr(experiment, "_line_catalog", lambda *args, **kwargs: catalog)
+    monkeypatch.setattr(
+        experiment,
+        "_verified_page",
+        lambda _note: {
+            "selected_page": {"note_page": 4},
+            "reconstruction": {"native_dimensions": [1404, 1872]},
+            "strokes": [
+                _stroke("stroke-1", 0, 15, 15),
+                _stroke("stroke-2", 1, 45, 15),
+                _stroke("stroke-3", 2, 75, 15),
+            ],
+        },
+    )
+
+    def factory(observer: Any) -> FakeReader:
+        return FakeReader(observer)
+
+    artifact = experiment.run_boox_recognition(
+        image_path,
+        note_path=note_path,
+        runs=2,
+        output_path=tmp_path / "experiment.json",
+        reader_factory=factory,
+        markdown=True,
+        native_stroke_width=None,
+    )
+    assert artifact["recovery_requested"] is True
+    assert artifact["request_controls"]["num_predict"] == 2048
+    assert artifact["reference_render_controls"] == {
+        "native_stroke_width": 6,
+        "reference_height": 64,
+            "reference_lines": [
+                "region-02-line-01",
+                "region-02-line-02",
+                "region-03-line-01",
+            ],
+    }
+    results = artifact["results"]
+    assert all(result["condition"] == "leave-one-region-out" for result in results)
+    assert [result["reference_stroke_ids"] for result in results] == [
+        ["stroke-2"],
+        ["stroke-1"],
+        [],
+    ]
+    assert results[2]["reference_selection"]["reason"] == "insufficient_same_region_references"
+    recovery_path = tmp_path / "page.sibyl" / "recovery.md"
+    evidence_path = tmp_path / "page.sibyl" / "recovery.json"
+    assert recovery_path.read_text() == "candidate\n\ncandidate\n\ncandidate\n"
+    evidence = json.loads(evidence_path.read_text())
+    assert evidence["recovery"]["selection_condition"] == "leave-one-region-out"
+    assert len(evidence["results"]) == 3
