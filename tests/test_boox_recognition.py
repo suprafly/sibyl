@@ -208,6 +208,96 @@ def test_condition_selection_is_canonical_and_rejects_unknown_values() -> None:
         raise AssertionError("duplicate conditions should be rejected")
 
 
+def _adaptive_fixture(responses: list[tuple[str, str | None]]) -> tuple[list[dict[str, Any]], Any]:
+    calls: list[dict[str, Any]] = []
+
+    def read_stage(condition: str, reference_size: int | None, count: int) -> list[dict[str, Any]]:
+        calls.append({"condition": condition, "reference_size": reference_size, "count": count})
+        result: list[dict[str, Any]] = []
+        for index in range(count):
+            status, reading = responses.pop(0)
+            result.append({"run": index + 1, "status": status, "reading": reading})
+        return result
+
+    return calls, read_stage
+
+
+def test_adaptive_exact_baseline_agreement_stops_without_native() -> None:
+    calls, reader = _adaptive_fixture([("ok", "Xylem"), ("ok", "Xylem")])
+    result = experiment._adaptive_recovery(
+        reader,
+        baseline_attempts=2,
+        targeted_rereads=1,
+        native_reference_sizes=(1, None),
+        native_enabled=True,
+        native_runs=2,
+    )
+    assert result["selection"]["reading"] == "Xylem"
+    assert [call["condition"] for call in calls] == ["baseline", "baseline"]
+
+
+def test_adaptive_disagreement_uses_targeted_reread_then_stops_on_majority() -> None:
+    calls, reader = _adaptive_fixture(
+        [("ok", "a"), ("ok", "b"), ("ok", "a")]
+    )
+    result = experiment._adaptive_recovery(
+        reader,
+        baseline_attempts=2,
+        targeted_rereads=1,
+        native_reference_sizes=(1, None),
+        native_enabled=True,
+        native_runs=2,
+    )
+    assert result["selection"]["reading"] == "a"
+    assert [call["condition"] for call in calls] == ["baseline", "baseline", "baseline"]
+    assert all(stage["condition"] == "baseline" for stage in result["stages"])
+
+
+def test_adaptive_failures_retry_and_native_runs_only_after_unresolved() -> None:
+    calls, reader = _adaptive_fixture(
+        [
+            ("truncated_response", None),
+            ("ok", "a"),
+            ("ok", "b"),
+            ("ok", "c"),
+            ("ok", "c"),
+        ]
+    )
+    result = experiment._adaptive_recovery(
+        reader,
+        baseline_attempts=2,
+        targeted_rereads=1,
+        native_reference_sizes=(1, None),
+        native_enabled=True,
+        native_runs=2,
+    )
+    assert result["selection"]["reading"] == "c"
+    assert calls == [
+        {"condition": "baseline", "reference_size": None, "count": 1},
+        {"condition": "baseline", "reference_size": None, "count": 1},
+        {"condition": "baseline", "reference_size": None, "count": 1},
+        {"condition": "native-exemplar", "reference_size": 1, "count": 2},
+    ]
+    assert result["stages"][-1]["stage"] == "native-reference"
+
+
+def test_adaptive_exhaustion_preserves_failures_and_reference_sizes() -> None:
+    calls, reader = _adaptive_fixture(
+        [("ok", "a"), ("ok", "b"), ("ok", "c"), ("ok", "d"), ("ok", "e")]
+    )
+    result = experiment._adaptive_recovery(
+        reader,
+        baseline_attempts=2,
+        targeted_rereads=1,
+        native_reference_sizes=(1, None),
+        native_enabled=True,
+        native_runs=1,
+    )
+    assert result["status"] == "unresolved"
+    assert [call["reference_size"] for call in calls] == [None, None, None, 1, None]
+    assert [stage["calls"] for stage in result["stages"]] == [1, 1, 1, 1, 1]
+
+
 def test_reference_line_selection_is_canonical_and_validated() -> None:
     catalog = [
         {"reference_id": "line-b"},
@@ -534,16 +624,13 @@ def test_markdown_recovery_enumerates_lines_and_writes_auditable_projection(
             ],
     }
     results = artifact["results"]
-    assert all(result["condition"] == "leave-one-region-out" for result in results)
-    assert [result["reference_stroke_ids"] for result in results] == [
-        ["stroke-2"],
-        ["stroke-1"],
-        [],
-    ]
-    assert results[2]["reference_selection"]["reason"] == "insufficient_same_region_references"
+    assert len(results) == 6
+    assert all(result["condition"] == "baseline" for result in results)
+    assert all(result["reference_stroke_ids"] == [] for result in results)
     recovery_path = tmp_path / "page.sibyl" / "recovery.md"
     evidence_path = tmp_path / "page.sibyl" / "recovery.json"
     assert recovery_path.read_text() == "candidate\n\ncandidate\n\ncandidate\n"
     evidence = json.loads(evidence_path.read_text())
-    assert evidence["recovery"]["selection_condition"] == "leave-one-region-out"
-    assert len(evidence["results"]) == 3
+    assert evidence["recovery"]["selection_condition"] == "adaptive"
+    assert len(evidence["results"]) == 6
+    assert evidence["recovery_summary"]["model_calls"] == 6

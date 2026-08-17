@@ -105,7 +105,10 @@ without line enumeration to discover accepted coarse text-region targets in
 reading order. Line localization is optional nested evidence; line children
 are never emitted as independent document blocks. References for a coarse
 target come only from other coarse regions, with structural target exclusion.
-The command writes
+Recovery is adaptive: it performs a cheap baseline read first, retries only
+when evidence is insufficient, and spends native-reference inference only on
+regions that remain unresolved. It stops as soon as the existing selector
+accepts a reading and reports model-call counts. The command writes
 `<image-stem>.sibyl/recovery.md` plus `recovery.json` evidence:
 
 ```sh
@@ -122,5 +125,7 @@ uv run sibyl experiment boox-recognition \
 
 Recovery selects only repeated evidence: exact agreement or a strict
 normalized majority. Otherwise it writes `⟦unresolved⟧` and preserves every
-candidate and raw run in `recovery.json`. The canonical `sibyl run --markdown`
-path remains image-only and writes `transform.md`.
+candidate, stage, and raw run in `recovery.json`. Optional recovery controls
+include `--baseline-attempts`, `--targeted-rereads`,
+`--no-native-escalation`, and `--native-reference-sizes 1,all`. The canonical
+`sibyl run --markdown` path remains image-only and writes `transform.md`.

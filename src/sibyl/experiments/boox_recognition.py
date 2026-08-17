@@ -37,6 +37,9 @@ BOOX_RECOGNITION_NUM_CTX = 8192
 BOOX_RECOVERY_NUM_PREDICT = 2048
 BOOX_RECOVERY_STROKE_WIDTH = 6
 BOOX_RECOVERY_REFERENCE_HEIGHT = 64
+BOOX_RECOVERY_BASELINE_ATTEMPTS = 2
+BOOX_RECOVERY_TARGETED_REREADS = 1
+BOOX_RECOVERY_NATIVE_REFERENCE_SIZES = (1, None)
 PAGE = 4
 NATIVE_SIZE = (1404, 1872)
 CONDITIONS = (
@@ -539,22 +542,137 @@ def _select_recovery_reading(analysis: dict[str, Any]) -> dict[str, Any]:
     }
 
 
+def _analysis_from_runs(runs: list[dict[str, Any]]) -> dict[str, Any]:
+    readings = [item["reading"] for item in runs if isinstance(item.get("reading"), str)]
+    failures = [item for item in runs if item.get("status") != "ok"]
+    return _condition_analysis(
+        {
+            "runs": runs,
+            "readings": readings,
+            "normalized_readings": [" ".join(item.casefold().split()) for item in readings],
+            "distinct_readings": list(dict.fromkeys(readings)),
+            "failures": failures,
+            "invalid_count": sum(item.get("status") == "invalid_response" for item in runs),
+        }
+    )
+
+
+def _adaptive_recovery(
+    read_stage: Callable[[str, int | None, int], list[dict[str, Any]]],
+    *,
+    baseline_attempts: int,
+    targeted_rereads: int,
+    native_reference_sizes: tuple[int | None, ...],
+    native_enabled: bool,
+    native_runs: int,
+) -> dict[str, Any]:
+    """Run recovery stages until the unchanged conservative selector accepts."""
+    if baseline_attempts <= 0 or targeted_rereads < 0 or native_runs <= 0:
+        raise ValueError("recovery budgets must be positive where applicable")
+    all_baseline: list[dict[str, Any]] = []
+    stages: list[dict[str, Any]] = []
+
+    def attempt(
+        stage: str, condition: str, reference_size: int | None, count: int
+    ) -> dict[str, Any]:
+        runs = read_stage(condition, reference_size, count)
+        stages.append(
+            {
+                "stage": stage,
+                "condition": condition,
+                "runs": runs,
+                "calls": len(runs),
+                "selection": None,
+            }
+        )
+        return stages[-1]
+
+    def finish(status: str, selection: dict[str, Any], reason: str) -> dict[str, Any]:
+        for stage in stages:
+            stage["continue_reason"] = (
+                "selected"
+                if stage["selection"]["status"] == "selected"
+                else stage["selection"]["reason"]
+            )
+        all_runs = [run for stage in stages for run in stage["runs"]]
+        return {
+            "status": status,
+            "selection": selection,
+            "stages": stages,
+            "stop_reason": reason,
+            "total_model_calls": len(all_runs),
+            "successful_reads": [
+                run["reading"]
+                for run in all_runs
+                if isinstance(run.get("reading"), str)
+            ],
+            "failures": [run for run in all_runs if run.get("status") != "ok"],
+        }
+
+    for attempt_number in range(1, baseline_attempts + 1):
+        stage = attempt(
+            "baseline" if attempt_number == 1 else "baseline-retry",
+            "baseline",
+            None,
+            1,
+        )
+        all_baseline.extend(stage["runs"])
+        selection = _select_recovery_reading(_analysis_from_runs(all_baseline))
+        stage["selection"] = selection
+        if selection["status"] == "selected":
+            return finish("selected", selection, "stop_on_baseline_selection")
+
+    for _ in range(1, targeted_rereads + 1):
+        stage = attempt("targeted-baseline-reread", "baseline", None, 1)
+        all_baseline.extend(stage["runs"])
+        selection = _select_recovery_reading(_analysis_from_runs(all_baseline))
+        stage["selection"] = selection
+        if selection["status"] == "selected":
+            return finish("selected", selection, "stop_on_targeted_reread_selection")
+
+    if native_enabled:
+        for index, size in enumerate(native_reference_sizes, start=1):
+            condition = "native-exemplar" if index == 1 else "multi-exemplar"
+            stage = attempt(
+                "native-reference" if index == 1 else "native-reference-expansion",
+                condition,
+                size,
+                native_runs,
+            )
+            selection = _select_recovery_reading(_analysis_from_runs(stage["runs"]))
+            stage["selection"] = selection
+            if selection["status"] == "selected":
+                return finish("selected", selection, "stop_on_native_selection")
+    return finish(
+        "unresolved",
+        stages[-1]["selection"]
+        if stages
+        else _select_recovery_reading(_analysis_from_runs(all_baseline)),
+        "all_recovery_stages_exhausted",
+    )
+
+
 def _write_page_recovery(
     artifact: dict[str, Any], image_path: Path
 ) -> tuple[Path, Path]:
     output_directory = image_path.parent / f"{image_path.stem}.sibyl"
     output_directory.mkdir(parents=True, exist_ok=True)
     selected_results: dict[str, dict[str, Any]] = {}
+    adaptive_results: dict[str, dict[str, Any]] = {}
     for result in artifact["results"]:
         if result["condition"] == "leave-one-region-out":
             selected_results[result["target"]["target_id"]] = _select_recovery_reading(
                 result["analysis"]
             )
+    for target in artifact.get("targets", []):
+        adaptive = target.get("adaptive_recovery")
+        if isinstance(adaptive, dict) and isinstance(adaptive.get("selection"), dict):
+            adaptive_results[target["target_id"]] = adaptive["selection"]
     markdown_lines: list[str] = []
     recovery_targets: list[dict[str, Any]] = []
     for target in artifact["targets"]:
         target_id = target["target_id"]
-        selection = selected_results.get(
+        selection = adaptive_results.get(target_id, selected_results.get(
             target_id,
             {
                 "status": "unresolved",
@@ -563,7 +681,7 @@ def _write_page_recovery(
                 "reason": "leave_one_region_out_result_missing",
                 "candidates": [],
             },
-        )
+        ))
         markdown_lines.append(
             selection["reading"] if selection["reading"] is not None else "⟦unresolved⟧"
         )
@@ -574,7 +692,8 @@ def _write_page_recovery(
         "source_sha256": artifact["source_sha256"],
         "note": artifact["native_source"],
         "targets": recovery_targets,
-        "selection_condition": "leave-one-region-out",
+        "selection_condition": "adaptive" if adaptive_results else "leave-one-region-out",
+        "summary": artifact.get("recovery_summary"),
         "markdown": str(output_directory / "recovery.md"),
         "evidence": str(output_directory / "recovery.json"),
     }
@@ -621,6 +740,10 @@ def run_boox_recognition(
     reference_height: int | None = None,
     reference_lines: str | None = None,
     conditions: str | None = None,
+    baseline_attempts: int = BOOX_RECOVERY_BASELINE_ATTEMPTS,
+    targeted_rereads: int = BOOX_RECOVERY_TARGETED_REREADS,
+    native_escalation: bool = True,
+    native_reference_sizes: str | None = None,
     review_path: Path | None = None,
     output_path: Path = DEFAULT_OUTPUT,
     reread_path: Path = DEFAULT_REREAD,
@@ -632,10 +755,10 @@ def run_boox_recognition(
         raise ValueError("runs must be positive")
     if num_ctx <= 0:
         raise ValueError("num_ctx must be positive")
+    if baseline_attempts <= 0 or targeted_rereads < 0:
+        raise ValueError("recovery budgets must be positive where applicable")
     if markdown and conditions is None:
         conditions = "leave-one-region-out"
-    if markdown and conditions is not None and "leave-one-region-out" not in conditions.split(","):
-        raise ValueError("--markdown recovery requires leave-one-region-out")
     requested_conditions = selected_conditions(conditions)
     if markdown:
         if num_predict is None:
@@ -699,6 +822,27 @@ def run_boox_recognition(
     native = _verified_page(note_path)
     source_size = (Image.open(image_path).width, Image.open(image_path).height)
     selected_reference_lines = _reference_lines(catalog, reference_lines)
+    if native_reference_sizes is None:
+        configured_native_sizes: tuple[int | None, ...] = BOOX_RECOVERY_NATIVE_REFERENCE_SIZES
+    else:
+        configured_native_sizes_list: list[int | None] = []
+        for raw_size in native_reference_sizes.split(","):
+            value = raw_size.strip().casefold()
+            if value == "all":
+                configured_native_sizes_list.append(None)
+            elif value:
+                try:
+                    parsed_size = int(value)
+                except ValueError as error:
+                    raise ValueError(
+                        "native reference sizes must be positive integers or all"
+                    ) from error
+                if parsed_size <= 0:
+                    raise ValueError("native reference sizes must be positive")
+                configured_native_sizes_list.append(parsed_size)
+        if not configured_native_sizes_list:
+            raise ValueError("native reference sizes must not be empty")
+        configured_native_sizes = tuple(dict.fromkeys(configured_native_sizes_list))
     review = _load_review(review_path)
     output_path.parent.mkdir(parents=True, exist_ok=True)
     generated = output_path.parent / "boox-recognition"
@@ -755,8 +899,223 @@ def run_boox_recognition(
         "output": str(output_path),
         "recovery_requested": markdown,
     }
+    if markdown:
+        artifact["recovery_controls"] = {
+            "baseline_attempts": baseline_attempts,
+            "targeted_rereads": targeted_rereads,
+            "native_escalation": native_escalation,
+            "native_reference_sizes": [
+                size if size is not None else "all" for size in configured_native_sizes
+            ],
+        }
     checkpoint()
     strokes = native["strokes"]
+    if markdown:
+        page_summary = {
+            "total_targets": len(targets),
+            "resolved_baseline": 0,
+            "resolved_retry": 0,
+            "resolved_native": 0,
+            "unresolved": 0,
+            "model_calls": 0,
+        }
+        for target in targets:
+            target_id = target["target_id"]
+            target_bbox = _bbox_tuple(target.get("source_bbox"))
+            target_record = {
+                "target_id": target_id,
+                "kind": target["kind"],
+                "path": str(target["path"]),
+                "sha256": _sha256(Path(target["path"])),
+                "source_bbox": target.get("source_bbox"),
+                "native_bbox": _map_bbox(target_bbox, source_size) if target_bbox else None,
+                "line_evidence": target.get("line_evidence", {}),
+            }
+            artifact["targets"].append(target_record)
+            other_lines = [
+                line
+                for line in selected_reference_lines
+                if target_bbox is None or not _intersects(target_bbox, line["bbox"])
+            ]
+            if target["kind"] == "region":
+                other_lines = [line for line in other_lines if line.get("region_id") != target_id]
+                reference_selection = {
+                    "policy": "other_coarse_regions_excluding_target",
+                    "target_region": target_id,
+                    "eligible_reference_lines": [line["reference_id"] for line in other_lines],
+                    "reason": (
+                        "other_region_references_selected"
+                        if other_lines
+                        else "insufficient_other_region_references"
+                    ),
+                }
+            else:
+                target_region = _line_region({"target_id": target_id})
+                other_lines = [line for line in other_lines if _line_region(line) == target_region]
+                reference_selection = {
+                    "policy": "same_region_excluding_target",
+                    "target_region": target_region,
+                    "eligible_reference_lines": [line["reference_id"] for line in other_lines],
+                    "reason": (
+                        "same_region_references_selected"
+                        if other_lines
+                        else "insufficient_same_region_references"
+                    ),
+                }
+
+            def read_stage(
+                condition: str,
+                reference_size: int | None,
+                stage_runs: int,
+                *,
+                target: dict[str, Any] = target,
+                target_id: str = target_id,
+                target_record: dict[str, Any] = target_record,
+                other_lines: list[dict[str, Any]] = other_lines,
+                reference_selection: dict[str, Any] = reference_selection,
+            ) -> list[dict[str, Any]]:
+                references = [] if condition == "baseline" else (
+                    other_lines if reference_size is None else other_lines[:reference_size]
+                )
+                reference_records: list[dict[str, Any]] = []
+                if condition != "baseline":
+                    for reference in references:
+                        native_bbox = _map_bbox(reference["bbox"], source_size)
+                        path = generated / target_id / (
+                            f"adaptive-{condition}-{reference['reference_id']}.png"
+                        )
+                        record = render_native_reference(
+                            path,
+                            select_native_strokes(strokes, native_bbox),
+                            native_bbox=native_bbox,
+                            stroke_width=native_stroke_width,
+                            presentation_height=reference_height,
+                        )
+                        record.update({
+                            "reference_id": reference["reference_id"],
+                            "kind": "line",
+                            "source_bbox": reference["source_bbox"],
+                            "source_artifact": reference["source_artifact"],
+                            "native_bbox": native_bbox,
+                        })
+                        reference_records.append(record)
+                images = [Image.open(record["path"]).convert("RGB") for record in reference_records]
+                images.append(Image.open(target["path"]).convert("RGB"))
+                observed: Any = None
+
+                def observe(value: dict[str, Any]) -> None:
+                    nonlocal observed
+                    observed = value
+
+                reader = (
+                    reader_factory(observe)
+                    if reader_factory
+                    else OllamaExemplarReader(observer=observe)
+                )
+                prompt = ISOLATED_PROMPT if condition == "baseline" else NATIVE_PROMPT
+                try:
+                    analysis = _condition_analysis(
+                        _read_configuration(reader, images, prompt, controls, stage_runs)
+                    )
+                    _add_truncated_evidence(analysis)
+                    analysis["parsed_responses"] = [
+                        {
+                            "run": item["run"],
+                            "status": item["status"],
+                            "reading": item.get("reading"),
+                            "thinking": item.get("raw_response", {})
+                            .get("message", {})
+                            .get("thinking")
+                            if isinstance(item.get("raw_response"), dict)
+                            and isinstance(item["raw_response"].get("message"), dict)
+                            else None,
+                            "truncated_evidence": item.get("truncated_evidence"),
+                        }
+                        for item in analysis["runs"]
+                    ]
+                    model = reader.model
+                finally:
+                    reader.release()
+                    for image in images:
+                        image.close()
+                analysis["evaluation"] = {
+                    "status": "not_evaluated",
+                    "reason": "no_confirmed_review",
+                }
+                if target_id in review:
+                    analysis["evaluation"] = {
+                        "metrics": [
+                            evaluate_reading(reading, review[target_id])
+                            for reading in analysis["readings"]
+                        ],
+                        "ground_truth": review[target_id],
+                    }
+                result = {
+                    "target": target_record,
+                    "condition": condition,
+                    "reference_condition": condition,
+                    "reference_images": reference_records,
+                    "reference_stroke_ids": [
+                        stroke_id
+                        for record in reference_records
+                        for stroke_id in record["stroke_ids"]
+                    ],
+                    "reference_render_controls": {
+                        "native_stroke_width": native_stroke_width,
+                        "reference_height": reference_height,
+                        "reference_lines": [reference["reference_id"] for reference in references],
+                    },
+                    "reference_selection": reference_selection,
+                    "prompt_variant": (
+                        "baseline"
+                        if condition == "baseline"
+                        else "native-style-exemplar"
+                    ),
+                    "prompt": prompt,
+                    "model": model,
+                    "request_controls": controls,
+                    "image_order": [
+                        record.get("reference_id") for record in reference_records
+                    ]
+                    + [target_id],
+                    "raw_response_observed": observed is not None,
+                    "analysis": analysis,
+                }
+                artifact["results"].append(result)
+                artifact["completed_results"].append(f"{target_id}:{condition}")
+                return cast(list[dict[str, Any]], analysis["runs"])
+
+            result_start = len(artifact["results"])
+            adaptive = _adaptive_recovery(
+                read_stage,
+                baseline_attempts=baseline_attempts,
+                targeted_rereads=targeted_rereads,
+                native_reference_sizes=configured_native_sizes,
+                native_enabled=native_escalation,
+                native_runs=runs,
+            )
+            for result, stage in zip(
+                artifact["results"][result_start:], adaptive["stages"], strict=True
+            ):
+                result["stage"] = stage["stage"]
+            target_record["adaptive_recovery"] = adaptive
+            page_summary["model_calls"] += sum(stage["calls"] for stage in adaptive["stages"])
+            if adaptive["status"] == "selected":
+                selected_stage = adaptive["stages"][-1]["stage"]
+                if selected_stage == "baseline":
+                    page_summary["resolved_baseline"] += 1
+                elif selected_stage in {"baseline-retry", "targeted-baseline-reread"}:
+                    page_summary["resolved_retry"] += 1
+                else:
+                    page_summary["resolved_native"] += 1
+            else:
+                page_summary["unresolved"] += 1
+            checkpoint()
+        artifact["recovery_summary"] = page_summary
+        artifact["status"] = "complete"
+        _write_page_recovery(artifact, image_path)
+        checkpoint()
+        return cast(dict[str, Any], json.loads(output_path.read_text(encoding="utf-8")))
     for target in targets:
         target_id = target["target_id"]
         target_bbox = _bbox_tuple(target.get("source_bbox"))
@@ -974,4 +1333,15 @@ def format_boox_recognition(result: dict[str, Any]) -> str:
     recovery = result.get("recovery")
     if isinstance(recovery, dict):
         lines.extend([f"recovery: {recovery['markdown']}", f"evidence: {recovery['evidence']}"])
+    summary = result.get("recovery_summary")
+    if isinstance(summary, dict):
+        lines.extend(
+            [
+                f"resolved baseline: {summary['resolved_baseline']}",
+                f"resolved retry: {summary['resolved_retry']}",
+                f"resolved native: {summary['resolved_native']}",
+                f"unresolved: {summary['unresolved']}",
+                f"model calls: {summary['model_calls']}",
+            ]
+        )
     return "\n".join(lines)

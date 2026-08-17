@@ -285,8 +285,30 @@ def build_parser() -> argparse.ArgumentParser:
         help="recover the page with BOOX evidence and write recovery.md",
     )
     boox_recognition.add_argument(
+        "--baseline-attempts",
+        type=int,
+        default=2,
+        help="recovery baseline attempts including the initial read",
+    )
+    boox_recognition.add_argument(
+        "--targeted-rereads",
+        type=int,
+        default=1,
+        help="targeted baseline rereads for unresolved recovery regions",
+    )
+    boox_recognition.add_argument(
+        "--no-native-escalation",
+        action="store_true",
+        help="disable native-reference escalation during recovery",
+    )
+    boox_recognition.add_argument(
+        "--native-reference-sizes",
+        default=None,
+        help="recovery native reference sizes, comma-separated integers or all",
+    )
+    boox_recognition.add_argument(
         "--conditions",
-        help="comma-separated conditions (default: all five conditions)",
+        help="comma-separated conditions for targeted experiments; recovery is adaptive",
     )
     boox_recognition.add_argument(
         "--review", type=Path, help="confirmed evaluation-only review JSON/YAML"
@@ -537,6 +559,10 @@ def main(argv: Sequence[str] | None = None) -> int:
                 reference_height=arguments.reference_height,
                 reference_lines=arguments.reference_lines,
                 conditions=arguments.conditions,
+                baseline_attempts=arguments.baseline_attempts,
+                targeted_rereads=arguments.targeted_rereads,
+                native_escalation=not arguments.no_native_escalation,
+                native_reference_sizes=arguments.native_reference_sizes,
                 markdown=arguments.markdown,
                 review_path=arguments.review,
                 output_path=arguments.output,
