@@ -1,6 +1,6 @@
 # Sibyl
 
-![Sibyl — a handwriting intelligence project](docs/assets/sibyl-banner.png)
+![Sibyl — a handwriting intelligence project](docs/assets/sibyl-banner-alt.png)
 
 Sibyl is a local-first Python system for transforming handwritten source
 imagery into structured digital artifacts. Original scans and photographs
