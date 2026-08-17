@@ -4,10 +4,22 @@ from __future__ import annotations
 
 import argparse
 import json
+import zipfile
 from collections.abc import Sequence
 from pathlib import Path
 
 from sibyl import __version__
+from sibyl.corpus import format_corpus_result, prepare_boox_corpus
+from sibyl.experiments.boox_strokes import (
+    DEFAULT_NOTE as BOOX_STROKES_DEFAULT_NOTE,
+)
+from sibyl.experiments.boox_strokes import (
+    DEFAULT_PAGE as BOOX_STROKES_DEFAULT_PAGE,
+)
+from sibyl.experiments.boox_strokes import (
+    format_boox_strokes,
+    inspect_boox_strokes,
+)
 from sibyl.experiments.convergence import (
     DEFAULT_JSON as CONVERGENCE_DEFAULT_JSON,
 )
@@ -84,8 +96,42 @@ def build_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument("--version", action="store_true", help="show the executable version")
     commands = parser.add_subparsers(dest="command")
+    corpus = commands.add_parser("corpus", help="prepare local corpus source artifacts")
+    corpus_commands = corpus.add_subparsers(dest="corpus_name", required=True)
+    boox = corpus_commands.add_parser(
+        "boox-reduce", help="create a source-preserving PDF from a BOOX note page set"
+    )
+    boox.add_argument("note", type=Path, help="BOOX .note file")
+    boox.add_argument("pdf", type=Path, help="full source PDF")
+    boox.add_argument(
+        "--output",
+        type=Path,
+        default=Path("samples/Grafting-101-corpus.pdf"),
+        help="reduced PDF output path",
+    )
+    boox.add_argument(
+        "--manifest",
+        type=Path,
+        default=Path("samples/Grafting-101-corpus.json"),
+        help="provenance manifest path",
+    )
     experiment_parser = commands.add_parser("experiment", help="run an empirical experiment")
     experiment_commands = experiment_parser.add_subparsers(dest="experiment_name", required=True)
+    boox_strokes = experiment_commands.add_parser(
+        "boox-strokes", help="inspect native BOOX handwriting stroke resources"
+    )
+    boox_strokes.add_argument(
+        "note", type=Path, nargs="?", default=BOOX_STROKES_DEFAULT_NOTE, help="BOOX .note file"
+    )
+    boox_strokes.add_argument(
+        "--page", type=int, default=BOOX_STROKES_DEFAULT_PAGE, help="one-based page number"
+    )
+    boox_strokes.add_argument(
+        "--output",
+        type=Path,
+        default=Path(".sibyl/experiments/boox-strokes"),
+        help="artifact directory",
+    )
     trocr = experiment_commands.add_parser(
         "trocr", help="recognize one handwritten line with TrOCR Large"
     )
@@ -238,6 +284,19 @@ def main(argv: Sequence[str] | None = None) -> int:
     if arguments.version:
         print(__version__)
         return 0
+    if arguments.command == "corpus" and arguments.corpus_name == "boox-reduce":
+        try:
+            corpus_result = prepare_boox_corpus(
+                arguments.note,
+                arguments.pdf,
+                output_pdf=arguments.output,
+                manifest_path=arguments.manifest,
+            )
+        except (FileNotFoundError, RuntimeError, ValueError, OSError) as error:
+            print(f"sibyl: error: {error}", file=__import__("sys").stderr)
+            return 2
+        print(format_corpus_result(corpus_result))
+        return 0
     if arguments.command == "experiment" and arguments.experiment_name == "trocr":
         try:
             result = run_experiment(arguments.image)
@@ -245,6 +304,15 @@ def main(argv: Sequence[str] | None = None) -> int:
             print(f"sibyl: error: {error}", file=__import__("sys").stderr)
             return 2
         print(format_result(result, arguments.json))
+    if arguments.command == "experiment" and arguments.experiment_name == "boox-strokes":
+        try:
+            boox_result = inspect_boox_strokes(
+                arguments.note, page=arguments.page, output=arguments.output
+            )
+        except (FileNotFoundError, RuntimeError, ValueError, OSError, zipfile.BadZipFile) as error:
+            print(f"sibyl: error: {error}", file=__import__("sys").stderr)
+            return 2
+        print(format_boox_strokes(boox_result))
     if arguments.command == "experiment" and arguments.experiment_name == "transcription-variance":
         try:
             variance_result = run_variance_experiment(
