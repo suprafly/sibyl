@@ -18,7 +18,9 @@ from sibyl.experiments.boox_strokes import (
 )
 from sibyl.experiments.boox_strokes import (
     format_boox_strokes,
+    format_boox_strokes_corpus,
     inspect_boox_strokes,
+    inspect_boox_strokes_all,
 )
 from sibyl.experiments.convergence import (
     DEFAULT_JSON as CONVERGENCE_DEFAULT_JSON,
@@ -123,8 +125,12 @@ def build_parser() -> argparse.ArgumentParser:
     boox_strokes.add_argument(
         "note", type=Path, nargs="?", default=BOOX_STROKES_DEFAULT_NOTE, help="BOOX .note file"
     )
-    boox_strokes.add_argument(
+    boox_page_group = boox_strokes.add_mutually_exclusive_group()
+    boox_page_group.add_argument(
         "--page", type=int, default=BOOX_STROKES_DEFAULT_PAGE, help="one-based page number"
+    )
+    boox_page_group.add_argument(
+        "--all-pages", action="store_true", help="inspect every page in the BOOX note"
     )
     boox_strokes.add_argument(
         "--output",
@@ -306,6 +312,10 @@ def main(argv: Sequence[str] | None = None) -> int:
         print(format_result(result, arguments.json))
     if arguments.command == "experiment" and arguments.experiment_name == "boox-strokes":
         try:
+            if arguments.all_pages:
+                boox_result = inspect_boox_strokes_all(arguments.note, output=arguments.output)
+                print(format_boox_strokes_corpus(boox_result))
+                return 0
             boox_result = inspect_boox_strokes(
                 arguments.note, page=arguments.page, output=arguments.output
             )

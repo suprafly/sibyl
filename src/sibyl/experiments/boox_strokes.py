@@ -293,5 +293,68 @@ def inspect_boox_strokes(
     return metadata
 
 
+def inspect_boox_strokes_all(note_path: Path, *, output: Path) -> dict[str, Any]:
+    """Inspect every page with the existing deterministic page inspector."""
+    if not note_path.is_file():
+        raise FileNotFoundError(f"Source file not found: {note_path}")
+    note = read_boox_metadata(note_path)
+    pages: list[dict[str, Any]] = []
+    failures: list[dict[str, Any]] = []
+    for selected in note["pages"]:
+        page = selected["note_page"]
+        try:
+            result = inspect_boox_strokes(note_path, page=page, output=output)
+        except (RuntimeError, ValueError, OSError, StopIteration, zipfile.BadZipFile) as error:
+            pages.append(
+                {
+                    "page": page,
+                    "page_id": selected["page_id"],
+                    "status": "failure",
+                    "stroke_count": 0,
+                    "point_count": 0,
+                }
+            )
+            failures.append({"page": page, "page_id": selected["page_id"], "error": str(error)})
+            continue
+        stroke_count = len(result["strokes"])
+        point_count = sum(
+            stroke.get("point_count", len(stroke.get("native_points", [])))
+            for stroke in result["strokes"]
+        )
+        pages.append(
+            {
+                "page": page,
+                "page_id": selected["page_id"],
+                "status": "success",
+                "stroke_count": stroke_count,
+                "point_count": point_count,
+            }
+        )
+
+    summary: dict[str, Any] = {
+        "artifact": "boox_strokes_corpus",
+        "source_note": str(note_path),
+        "source_note_sha256": _sha256(note_path.read_bytes()),
+        "page_count": note["page_count"],
+        "pages": pages,
+        "total_strokes": sum(page["stroke_count"] for page in pages),
+        "total_points": sum(page["point_count"] for page in pages),
+        "failures": failures,
+    }
+    artifact_path = output.parent / "boox-strokes.json"
+    artifact_path.parent.mkdir(parents=True, exist_ok=True)
+    artifact_path.write_text(json.dumps(summary, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+    return summary
+
+
 def format_boox_strokes(result: dict[str, Any]) -> str:
     return f"page: {result['selected_page']['note_page']}\nstrokes: {len(result['strokes'])}\noutput: {result['reconstruction']['native_dimensions']}"
+
+
+def format_boox_strokes_corpus(result: dict[str, Any]) -> str:
+    return (
+        f"pages: {result['page_count']}\n"
+        f"strokes: {result['total_strokes']}\n"
+        f"points: {result['total_points']}\n"
+        f"failures: {len(result['failures'])}"
+    )

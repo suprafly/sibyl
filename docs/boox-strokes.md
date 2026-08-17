@@ -54,6 +54,22 @@ uv run sibyl experiment boox-strokes \
   --output .sibyl/experiments/boox-strokes
 ```
 
+To process the complete note, use the explicit all-pages mode:
+
+```sh
+uv run sibyl experiment boox-strokes \
+  "samples/Grafting 101.note" --all-pages \
+  --output .sibyl/experiments/boox-strokes
+```
+
+`--all-pages` enumerates the note's stored page order and calls the same
+verified page decoder for each page. It preserves the existing per-page PNG,
+raw-resource, forensic, and metadata artifacts. The single corpus summary at
+`.sibyl/experiments/boox-strokes.json` contains `page_count`, a `pages` array
+with each page's `status`, `stroke_count`, and `point_count`, plus
+`total_strokes`, `total_points`, and `failures`. `--page N` remains the
+page-specific mode and cannot be combined with `--all-pages`.
+
 Inspect the JSON with `jq . .sibyl/experiments/boox-strokes.json` and
 `jq . .sibyl/experiments/boox-strokes/page-004-metadata.json`; view
 `page-004-native.png`, `page-004-strokes.png`, and any overlay/diff PNG in an

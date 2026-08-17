@@ -5,7 +5,7 @@ from pathlib import Path
 import pytest
 from PIL import Image
 
-from sibyl.experiments.boox_strokes import inspect_boox_strokes
+from sibyl.experiments.boox_strokes import inspect_boox_strokes, inspect_boox_strokes_all
 
 
 def _fixture(path: Path) -> None:
@@ -63,3 +63,47 @@ def test_uncertain_point_resource_is_preserved(
     result = inspect_boox_strokes(note, page=2, output=tmp_path / "out")
     assert result["raw_resource_preservation"] is True
     assert any(resource["kind"] == "point" for resource in result["resources"])
+
+
+def test_all_pages_writes_deterministic_summary_and_continues_after_page_failure(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    note = tmp_path / "fixture.note"
+    _fixture(note)
+    monkeypatch.chdir(tmp_path)
+    first = inspect_boox_strokes_all(note, output=tmp_path / "one")
+    second = inspect_boox_strokes_all(note, output=tmp_path / "two")
+
+    assert first == second
+    assert first["page_count"] == 2
+    assert first["pages"] == [
+        {
+            "page": 1,
+            "page_id": "page-one",
+            "status": "failure",
+            "stroke_count": 0,
+            "point_count": 0,
+        },
+        {
+            "page": 2,
+            "page_id": "page-four",
+            "status": "success",
+            "stroke_count": 1,
+            "point_count": 2,
+        },
+    ]
+    assert first["total_strokes"] == 1
+    assert first["total_points"] == 2
+    assert first["failures"][0]["page"] == 1
+    assert (tmp_path / "one/page-002-metadata.json").is_file()
+    assert json.loads((tmp_path / "one/../boox-strokes.json").read_text()) == first
+
+
+def test_page_and_all_pages_are_mutually_exclusive() -> None:
+    from sibyl.cli import build_parser
+
+    with pytest.raises(SystemExit) as error:
+        build_parser().parse_args(
+            ["experiment", "boox-strokes", "note.note", "--page", "4", "--all-pages"]
+        )
+    assert error.value.code == 2
