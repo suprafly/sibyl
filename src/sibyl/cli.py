@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import argparse
+import json
 from collections.abc import Sequence
 from pathlib import Path
 
@@ -23,6 +24,19 @@ from sibyl.experiments.handwriting_preprocess import (
 from sibyl.experiments.handwriting_preprocess import (
     format_handwriting_preprocess_result,
     run_handwriting_preprocess,
+)
+from sibyl.experiments.qwen_recognition_knobs import (
+    DEFAULT_OUTPUT as QWEN_KNOBS_DEFAULT_OUTPUT,
+)
+from sibyl.experiments.qwen_recognition_knobs import (
+    DEFAULT_RUNS as QWEN_KNOBS_DEFAULT_RUNS,
+)
+from sibyl.experiments.qwen_recognition_knobs import (
+    DEFAULT_SEEDS,
+    DEFAULT_TEMPERATURES,
+    DEFAULT_TOP_P,
+    format_qwen_recognition_knobs,
+    run_qwen_recognition_knobs,
 )
 from sibyl.experiments.transcription_reread import (
     DEFAULT_OUTPUT as REREAD_DEFAULT_OUTPUT,
@@ -119,6 +133,46 @@ def build_parser() -> argparse.ArgumentParser:
         default=HANDWRITING_PREPROCESS_DEFAULT_OUTPUT,
         help="experimental JSON output path",
     )
+    knobs = experiment_commands.add_parser(
+        "qwen-recognition-knobs",
+        help="measure Qwen handwriting prompt, context, and decoding controls",
+    )
+    knobs.add_argument("image", type=Path, help="page image")
+    knobs.add_argument("--regions", help="comma-separated existing region IDs")
+    knobs.add_argument("--lines", help="comma-separated existing line IDs (takes precedence)")
+    knobs.add_argument("--crop", type=Path, help="explicit existing source crop path")
+    knobs.add_argument(
+        "--runs", type=int, default=QWEN_KNOBS_DEFAULT_RUNS, help="runs per configuration"
+    )
+    knobs.add_argument(
+        "--contexts", help="comma-separated context variants, such as tight,padding-10"
+    )
+    knobs.add_argument(
+        "--prompts", default="regional,isolated,exact-word", help="comma-separated prompt variants"
+    )
+    knobs.add_argument(
+        "--temperatures",
+        default="0.0",
+        help="comma-separated temperatures; baseline is always included",
+    )
+    knobs.add_argument(
+        "--top-p", default="1.0", help="comma-separated top_p values; baseline is always included"
+    )
+    knobs.add_argument(
+        "--seeds", default="", help="comma-separated deterministic seeds; empty means baseline seed"
+    )
+    knobs.add_argument(
+        "--decode-sweep",
+        action="store_true",
+        help="expand to the documented temperature/top_p/seed sweep",
+    )
+    knobs.add_argument("--num-predict", type=int, default=256, help="Ollama num_predict control")
+    knobs.add_argument(
+        "--review", type=Path, help="optional JSON/YAML human review with confirmed ground_truth"
+    )
+    knobs.add_argument(
+        "--output", type=Path, default=QWEN_KNOBS_DEFAULT_OUTPUT, help="artifact path"
+    )
     converge = experiment_commands.add_parser(
         "converge", help="synthesize preserved Qwen/TrOCR evidence into a Markdown candidate"
     )
@@ -207,6 +261,56 @@ def main(argv: Sequence[str] | None = None) -> int:
             print(f"sibyl: error: {error}", file=__import__("sys").stderr)
             return 2
         print(format_handwriting_preprocess_result(preprocess_result))
+    if arguments.command == "experiment" and arguments.experiment_name == "qwen-recognition-knobs":
+        try:
+            temperatures: tuple[float, ...]
+            top_ps: tuple[float, ...]
+            seeds: tuple[int | None, ...]
+            if arguments.decode_sweep:
+                temperatures, top_ps, seeds = DEFAULT_TEMPERATURES, DEFAULT_TOP_P, DEFAULT_SEEDS
+            else:
+                temperatures = tuple(
+                    float(value) for value in arguments.temperatures.split(",") if value
+                )
+                top_ps = tuple(
+                    float(value) for value in arguments.top_p.split(",") if value
+                )
+                seeds = tuple(
+                    int(value) for value in arguments.seeds.split(",") if value
+                ) or (None,)
+            contexts = (
+                tuple(value.strip() for value in arguments.contexts.split(",") if value.strip())
+                if arguments.contexts
+                else None
+            )
+            prompts = tuple(
+                value.strip() for value in arguments.prompts.split(",") if value.strip()
+            )
+            knobs_result = run_qwen_recognition_knobs(
+                arguments.image,
+                runs=arguments.runs,
+                regions=arguments.regions,
+                lines=arguments.lines,
+                crop_path=arguments.crop,
+                contexts=contexts,
+                prompt_variants=prompts,
+                temperatures=temperatures,
+                top_ps=top_ps,
+                seeds=seeds,
+                num_predict=arguments.num_predict,
+                review_path=arguments.review,
+                output_path=arguments.output,
+            )
+        except (
+            FileNotFoundError,
+            RuntimeError,
+            ValueError,
+            OSError,
+            json.JSONDecodeError,
+        ) as error:
+            print(f"sibyl: error: {error}", file=__import__("sys").stderr)
+            return 2
+        print(format_qwen_recognition_knobs(knobs_result))
     if arguments.command == "experiment" and arguments.experiment_name == "converge":
         try:
             convergence_result = run_convergence(
