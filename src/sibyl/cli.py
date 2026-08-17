@@ -27,6 +27,19 @@ from sibyl.experiments.boox_recognition import (
 from sibyl.experiments.boox_recognition import (
     DEFAULT_RUNS as BOOX_RECOGNITION_DEFAULT_RUNS,
 )
+from sibyl.experiments.boox_stroke_segmentation import (
+    DEFAULT_IMAGE as BOOX_SEGMENTATION_DEFAULT_IMAGE,
+)
+from sibyl.experiments.boox_stroke_segmentation import (
+    DEFAULT_NOTE as BOOX_SEGMENTATION_DEFAULT_NOTE,
+)
+from sibyl.experiments.boox_stroke_segmentation import (
+    DEFAULT_OUTPUT as BOOX_SEGMENTATION_DEFAULT_OUTPUT,
+)
+from sibyl.experiments.boox_stroke_segmentation import (
+    format_stroke_segmentation,
+    run_stroke_segmentation,
+)
 from sibyl.experiments.boox_strokes import (
     DEFAULT_NOTE as BOOX_STROKES_DEFAULT_NOTE,
 )
@@ -319,6 +332,27 @@ def build_parser() -> argparse.ArgumentParser:
         default=BOOX_RECOGNITION_DEFAULT_OUTPUT,
         help="experimental JSON artifact",
     )
+    stroke_segmentation = experiment_commands.add_parser(
+        "boox-stroke-segmentation",
+        help="compare raster segmentation strategies using BOOX stroke geometry",
+    )
+    stroke_segmentation.add_argument(
+        "image", type=Path, nargs="?", default=BOOX_SEGMENTATION_DEFAULT_IMAGE
+    )
+    stroke_segmentation.add_argument(
+        "--note", type=Path, default=BOOX_SEGMENTATION_DEFAULT_NOTE
+    )
+    stroke_segmentation.add_argument("--runs", type=int, default=1)
+    stroke_segmentation.add_argument("--num-predict", type=int, default=2048)
+    stroke_segmentation.add_argument("--num-ctx", type=int, default=8192)
+    stroke_segmentation.add_argument("--review", type=Path)
+    stroke_segmentation.add_argument(
+        "--output", type=Path, default=BOOX_SEGMENTATION_DEFAULT_OUTPUT
+    )
+    stroke_segmentation.add_argument("--reread-artifact", type=Path)
+    stroke_segmentation.add_argument("--compare-artifact", type=Path)
+    stroke_segmentation.add_argument("--max-vertical-gap", type=float, default=70.0)
+    stroke_segmentation.add_argument("--max-word-gap", type=float, default=55.0)
     knobs = experiment_commands.add_parser(
         "qwen-recognition-knobs",
         help="measure Qwen handwriting prompt, context, and decoding controls",
@@ -424,6 +458,31 @@ def main(argv: Sequence[str] | None = None) -> int:
             print(f"sibyl: error: {error}", file=__import__("sys").stderr)
             return 2
         print(format_boox_strokes(boox_result))
+    if (
+        arguments.command == "experiment"
+        and arguments.experiment_name == "boox-stroke-segmentation"
+    ):
+        try:
+            segmentation_result = run_stroke_segmentation(
+                arguments.image,
+                note_path=arguments.note,
+                runs=arguments.runs,
+                num_predict=arguments.num_predict,
+                num_ctx=arguments.num_ctx,
+                review_path=arguments.review,
+                output_path=arguments.output,
+                reread_path=arguments.reread_artifact
+                or Path(".sibyl/experiments/transcription-reread.json"),
+                compare_path=arguments.compare_artifact
+                or Path(".sibyl/experiments/trocr-compare.json"),
+                max_vertical_gap=arguments.max_vertical_gap,
+                max_word_gap=arguments.max_word_gap,
+            )
+        except (FileNotFoundError, RuntimeError, ValueError, OSError, zipfile.BadZipFile) as error:
+            print(f"sibyl: error: {error}", file=__import__("sys").stderr)
+            return 2
+        print(format_stroke_segmentation(segmentation_result))
+        return 0
     if arguments.command == "experiment" and arguments.experiment_name == "transcription-variance":
         try:
             variance_result = run_variance_experiment(
