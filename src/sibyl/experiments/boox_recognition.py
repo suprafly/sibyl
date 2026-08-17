@@ -147,8 +147,14 @@ def render_native_reference(
     strokes: list[dict[str, Any]],
     *,
     native_bbox: tuple[int, int, int, int] | None = None,
+    stroke_width: int = 2,
+    presentation_height: int | None = None,
 ) -> dict[str, Any]:
     """Render native coordinates with fixed geometry and record exact provenance."""
+    if stroke_width <= 0:
+        raise ValueError("stroke_width must be positive")
+    if presentation_height is not None and presentation_height <= 0:
+        raise ValueError("presentation_height must be positive")
     if native_bbox is None:
         origin = (0, 0)
         size = NATIVE_SIZE
@@ -165,16 +171,26 @@ def render_native_reference(
             for point in points
         ]
         if len(pixels) > 1:
-            draw.line(pixels, fill=(0, 0, 0), width=2, joint="curve")
+            draw.line(pixels, fill=(0, 0, 0), width=stroke_width, joint="curve")
         elif pixels:
             x, y = pixels[0]
             draw.ellipse((x - 1, y - 1, x + 1, y + 1), fill=(0, 0, 0))
+    native_dimensions = {"width": image.width, "height": image.height}
+    presentation_scale = 1.0
+    if presentation_height is not None and image.height != presentation_height:
+        presentation_scale = presentation_height / image.height
+        presentation_size = (
+            max(1, round(image.width * presentation_scale)),
+            presentation_height,
+        )
+        image = image.resize(presentation_size, Image.Resampling.LANCZOS)
     path.parent.mkdir(parents=True, exist_ok=True)
     image.save(path, format="PNG", optimize=False)
     return {
         "path": str(path),
         "sha256": _sha256(path),
-        "dimensions": {"width": size[0], "height": size[1]},
+        "dimensions": {"width": image.width, "height": image.height},
+        "native_dimensions": native_dimensions,
         "native_origin": {"x": origin[0], "y": origin[1]},
         "stroke_ids": [stroke.get("stroke_id") for stroke in strokes],
         "point_counts": [
@@ -182,11 +198,30 @@ def render_native_reference(
         ],
         "rendering": {
             "background": "white",
-            "stroke_width": 2,
+            "stroke_width": stroke_width,
             "coordinate_transform": "identity",
             "crop": "native_bbox" if native_bbox is not None else "full_page",
+            "presentation_height": presentation_height,
+            "presentation_scale": presentation_scale,
+            "resampling": "lanczos" if presentation_height is not None else None,
         },
     }
+
+
+def _reference_lines(
+    catalog: list[dict[str, Any]], selection: str | None
+) -> list[dict[str, Any]]:
+    if selection is None:
+        return catalog
+    requested = [item.strip() for item in selection.split(",") if item.strip()]
+    if not requested or len(set(requested)) != len(requested):
+        raise ValueError("--reference-lines must contain unique line IDs")
+    known = {line["reference_id"] for line in catalog}
+    unknown = sorted(set(requested) - known)
+    if unknown:
+        raise ValueError(f"unknown reference line IDs: {', '.join(unknown)}")
+    requested_set = set(requested)
+    return [line for line in catalog if line["reference_id"] in requested_set]
 
 
 def _line_catalog(path: Path, image_path: Path) -> list[dict[str, Any]]:
@@ -346,6 +381,9 @@ def run_boox_recognition(
     runs: int = DEFAULT_RUNS,
     num_predict: int = BOOX_RECOGNITION_NUM_PREDICT,
     num_ctx: int = BOOX_RECOGNITION_NUM_CTX,
+    native_stroke_width: int = 2,
+    reference_height: int | None = None,
+    reference_lines: str | None = None,
     conditions: str | None = None,
     review_path: Path | None = None,
     output_path: Path = DEFAULT_OUTPUT,
@@ -359,6 +397,10 @@ def run_boox_recognition(
         raise ValueError("num_predict must be positive")
     if num_ctx <= 0:
         raise ValueError("num_ctx must be positive")
+    if native_stroke_width <= 0:
+        raise ValueError("native_stroke_width must be positive")
+    if reference_height is not None and reference_height <= 0:
+        raise ValueError("reference_height must be positive")
     requested_conditions = selected_conditions(conditions)
     if not image_path.is_file():
         raise FileNotFoundError(f"Image not found: {image_path}")
@@ -396,6 +438,7 @@ def run_boox_recognition(
     native = _verified_page(note_path)
     source_size = (Image.open(image_path).width, Image.open(image_path).height)
     catalog = _line_catalog(reread_path, image_path)
+    selected_reference_lines = _reference_lines(catalog, reference_lines)
     review = _load_review(review_path)
     output_path.parent.mkdir(parents=True, exist_ok=True)
     generated = output_path.parent / "boox-recognition"
@@ -441,6 +484,11 @@ def run_boox_recognition(
         "status": "running",
         "completed_results": [],
         "request_controls": controls,
+        "reference_render_controls": {
+            "native_stroke_width": native_stroke_width,
+            "reference_height": reference_height,
+            "reference_lines": [line["reference_id"] for line in selected_reference_lines],
+        },
         "targets": [],
         "evaluation_review": str(review_path) if review_path else None,
         "results": [],
@@ -464,7 +512,7 @@ def run_boox_recognition(
         checkpoint()
         other_lines = [
             line
-            for line in catalog
+            for line in selected_reference_lines
             if target_bbox is None
             or not _intersects(target_bbox, line["bbox"])
             or (line["reference_id"] == target_id and target["kind"] != "line")
@@ -484,7 +532,12 @@ def run_boox_recognition(
                 pass
             elif condition == "native-render":
                 path = generated / target_id / f"{condition}.png"
-                record = render_native_reference(path, select_native_strokes(strokes))
+                record = render_native_reference(
+                    path,
+                    select_native_strokes(strokes),
+                    stroke_width=native_stroke_width,
+                    presentation_height=reference_height,
+                )
                 record.update({"reference_id": "page-004-native", "kind": "full-page"})
                 reference_records.append(record)
             else:
@@ -492,7 +545,13 @@ def run_boox_recognition(
                     native_bbox = _map_bbox(reference["bbox"], source_size)
                     selected = select_native_strokes(strokes, native_bbox)
                     path = generated / target_id / f"{condition}-{reference['reference_id']}.png"
-                    record = render_native_reference(path, selected, native_bbox=native_bbox)
+                    record = render_native_reference(
+                        path,
+                        selected,
+                        native_bbox=native_bbox,
+                        stroke_width=native_stroke_width,
+                        presentation_height=reference_height,
+                    )
                     record.update(
                         {
                             "reference_id": reference["reference_id"],
@@ -567,6 +626,13 @@ def run_boox_recognition(
                         for record in reference_records
                         for stroke_id in record["stroke_ids"]
                     ],
+                    "reference_render_controls": {
+                        "native_stroke_width": native_stroke_width,
+                        "reference_height": reference_height,
+                        "reference_lines": [
+                            reference["reference_id"] for reference in references
+                        ],
+                    },
                     "prompt_variant": (
                         "baseline" if condition == "baseline" else "native-style-exemplar"
                     ),

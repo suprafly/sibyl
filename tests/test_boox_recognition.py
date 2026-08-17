@@ -55,6 +55,26 @@ def test_native_rendering_and_evaluation_are_deterministic(tmp_path: Path) -> No
     }
 
 
+def test_matched_native_rendering_records_presentation_parameters(tmp_path: Path) -> None:
+    record = experiment.render_native_reference(
+        tmp_path / "matched.png",
+        [_stroke("stroke-1", 0, 5, 6)],
+        stroke_width=6,
+        presentation_height=32,
+    )
+    assert record["dimensions"]["height"] == 32
+    assert record["native_dimensions"]["height"] == 1872
+    assert record["rendering"] == {
+        "background": "white",
+        "coordinate_transform": "identity",
+        "crop": "full_page",
+        "presentation_height": 32,
+        "presentation_scale": 32 / 1872,
+        "resampling": "lanczos",
+        "stroke_width": 6,
+    }
+
+
 def test_condition_selection_is_canonical_and_rejects_unknown_values() -> None:
     assert experiment.selected_conditions("leave-one-region-out,baseline") == (
         "baseline",
@@ -66,6 +86,22 @@ def test_condition_selection_is_canonical_and_rejects_unknown_values() -> None:
         assert "duplicates" in str(error)
     else:
         raise AssertionError("duplicate conditions should be rejected")
+
+
+def test_reference_line_selection_is_canonical_and_validated() -> None:
+    catalog = [
+        {"reference_id": "line-b"},
+        {"reference_id": "line-a"},
+    ]
+    assert [item["reference_id"] for item in experiment._reference_lines(catalog, "line-a")] == [
+        "line-a"
+    ]
+    try:
+        experiment._reference_lines(catalog, "missing")
+    except ValueError as error:
+        assert "missing" in str(error)
+    else:
+        raise AssertionError("unknown reference lines should be rejected")
 
 
 def test_qwen_response_extraction_prefers_content_and_falls_back_to_thinking() -> None:
@@ -243,6 +279,11 @@ def test_run_preserves_conditions_provenance_and_nonleaking_review(
     assert artifact["results"][0]["image_order"] == ["line-target"]
     assert artifact["request_controls"]["num_predict"] == 1024
     assert artifact["request_controls"]["num_ctx"] == 8192
+    assert artifact["reference_render_controls"] == {
+        "native_stroke_width": 2,
+        "reference_height": None,
+        "reference_lines": ["line-target", "line-reference"],
+    }
     assert artifact["results"][2]["reference_stroke_ids"] == ["reference-stroke"]
     assert "answer" not in artifact["results"][2]["prompt"]
     assert artifact["results"][2]["analysis"]["evaluation"]["ground_truth"] == "answer"

@@ -266,6 +266,21 @@ def build_parser() -> argparse.ArgumentParser:
         help="Ollama context size per read",
     )
     boox_recognition.add_argument(
+        "--native-stroke-width",
+        type=int,
+        default=2,
+        help="rendered native-reference stroke width in native pixels",
+    )
+    boox_recognition.add_argument(
+        "--reference-height",
+        type=int,
+        help="resize native line references to this presentation height",
+    )
+    boox_recognition.add_argument(
+        "--reference-lines",
+        help="comma-separated non-target line IDs to use as references",
+    )
+    boox_recognition.add_argument(
         "--conditions",
         help="comma-separated conditions (default: all five conditions)",
     )
@@ -514,6 +529,9 @@ def main(argv: Sequence[str] | None = None) -> int:
                 runs=arguments.runs,
                 num_predict=arguments.num_predict,
                 num_ctx=arguments.num_ctx,
+                native_stroke_width=arguments.native_stroke_width,
+                reference_height=arguments.reference_height,
+                reference_lines=arguments.reference_lines,
                 conditions=arguments.conditions,
                 review_path=arguments.review,
                 output_path=arguments.output,

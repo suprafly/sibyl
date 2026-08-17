@@ -82,3 +82,20 @@ references are under `.sibyl/experiments/boox-recognition/`. Compare the
 condition-level exact match, token/word overlap, unresolved tokens, candidate
 distribution, and stable reading. A result is not an improvement claim unless
 the observed evaluation demonstrates it across the controlled comparison.
+
+For the matched-rendering follow-up, select a small non-target reference set
+and make its presentation closer to the target crop. The native coordinate
+space remains identity; `--reference-height` is only a recorded presentation
+resize, and `--native-stroke-width` is only a recorded rendering parameter:
+
+```sh
+uv run sibyl experiment boox-recognition \
+  --lines region-02-line-04 \
+  --conditions baseline,leave-one-region-out \
+  --reference-lines region-02-line-02,region-02-line-03 \
+  --native-stroke-width 6 \
+  --reference-height 64 \
+  --num-predict 2048 \
+  --num-ctx 8192 \
+  --runs 3
+```
