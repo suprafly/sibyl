@@ -13,12 +13,16 @@ from collections import Counter
 from collections.abc import Callable, Iterable
 from io import BytesIO
 from pathlib import Path
-from typing import Any, Protocol
+from typing import Any, Protocol, cast
 
 from PIL import Image
 
 from sibyl.experiments.handwriting_preprocess import _targets, evaluate_candidate
-from sibyl.experiments.transcription_reread import REGIONAL_PROMPT, REGIONAL_SCHEMA
+from sibyl.experiments.transcription_reread import (
+    REGIONAL_PROMPT,
+    REGIONAL_SCHEMA,
+    _message_json,
+)
 from sibyl.transform import DEFAULT_OLLAMA_URL, DEFAULT_QWEN_MODEL
 
 DEFAULT_OUTPUT = Path(".sibyl/experiments/qwen-recognition-knobs.json")
@@ -125,16 +129,9 @@ class OllamaKnobReader:
         )
         if self.observer is not None:
             self.observer(body)
-        message = body.get("message", {})
-        content = message.get("content") if isinstance(message, dict) else None
-        parsed: Any = None
-        if isinstance(content, str):
-            try:
-                parsed = json.loads(content)
-            except json.JSONDecodeError:
-                parsed = None
+        text = extract_recognition_text(body)
         truncated = body.get("done_reason") == "length"
-        if not isinstance(parsed, dict) or not isinstance(parsed.get("text"), str):
+        if text is None:
             return {
                 "status": "truncated_response" if truncated else "invalid_response",
                 "error": "response was truncated" if truncated else "missing text",
@@ -143,13 +140,28 @@ class OllamaKnobReader:
         if truncated:
             return {
                 "status": "truncated_response",
-                "text": parsed["text"],
+                "text": text,
                 "raw_response": body,
             }, duration
-        return {"status": "ok", "text": parsed["text"], "raw_response": body}, duration
+        return {"status": "ok", "text": text, "raw_response": body}, duration
 
     def release(self) -> None:
         return None
+
+
+def extract_recognition_text(body: dict[str, Any]) -> str | None:
+    """Extract recognition text in Sibyl's established content/thinking order."""
+    parsed = _message_json(body)
+    if isinstance(parsed, dict) and isinstance(parsed.get("text"), str):
+        return cast(str, parsed["text"])
+    message = body.get("message")
+    if not isinstance(message, dict):
+        return None
+    for field in ("content", "thinking"):
+        candidate = message.get(field)
+        if isinstance(candidate, dict) and isinstance(candidate.get("text"), str):
+            return cast(str, candidate["text"])
+    return None
 
 
 def _bounds(metadata: dict[str, Any], source: Image.Image) -> tuple[int, int, int, int] | None:

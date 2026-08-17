@@ -4,12 +4,15 @@ from collections.abc import Callable
 from pathlib import Path
 from typing import Any, ClassVar
 
+import pytest
 from PIL import Image
 
 from sibyl.experiments.qwen_recognition_knobs import (
     EXACT_WORD_PROMPT,
     ISOLATED_PROMPT,
+    OllamaKnobReader,
     aggregate_candidates,
+    extract_recognition_text,
     run_qwen_recognition_knobs,
 )
 from sibyl.experiments.transcription_reread import REGIONAL_PROMPT
@@ -181,3 +184,62 @@ def test_decoding_sweep_preserves_baseline_and_explicit_controls(tmp_path: Path)
     assert {item["seed"] for item in controls} == {None, 7}
     assert {item["temperature"] for item in controls} == {None, 0.0, 0.2}
     assert {item["top_p"] for item in controls} == {None, 1.0, 0.9}
+
+
+def test_thinking_object_is_a_valid_observation_and_reaches_aggregation(tmp_path: Path) -> None:
+    source, crop = _crop_fixture(tmp_path)
+
+    class ThinkingReader:
+        model = "qwen-test"
+
+        def __init__(self, observer: Callable[[dict[str, Any]], None]) -> None:
+            self.observer = observer
+
+        def read(
+            self, image: Image.Image, prompt: str, controls: dict[str, Any]
+        ) -> tuple[dict[str, Any], float]:
+            raw = {"message": {"content": "", "thinking": {"text": "sclio"}}}
+            self.observer(raw)
+            return {"status": "ok", "text": "sclio", "raw_response": raw}, 1.0
+
+        def release(self) -> None:
+            return None
+
+    artifact = run_qwen_recognition_knobs(
+        source,
+        crop_path=crop,
+        runs=1,
+        prompt_variants=("isolated",),
+        output_path=tmp_path / "artifact.json",
+        reader_factory=ThinkingReader,
+    )
+    run = artifact["results"][0]["analysis"]["runs"][0]
+    assert run["status"] == "ok"
+    assert run["reading"] == "sclio"
+    assert run["raw_response"]["message"]["content"] == ""
+    assert run["raw_response"]["message"]["thinking"] == {"text": "sclio"}
+    assert artifact["results"][0]["analysis"]["readings"] == ["sclio"]
+    assert artifact["candidate_aggregation"][0]["candidate"] == "sclio"
+
+
+def test_content_json_and_empty_response_paths_remain_supported() -> None:
+    assert extract_recognition_text({"message": {"content": '{"text": "alpha"}'}}) == "alpha"
+    assert extract_recognition_text({"message": {"content": "", "thinking": {}}}) is None
+
+
+def test_ollama_reader_classifies_thinking_object_as_ok_and_preserves_raw(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    body = {"message": {"content": "", "thinking": {"text": "sclio"}}}
+    monkeypatch.setattr(
+        "sibyl.experiments.qwen_recognition_knobs._query",
+        lambda **_kwargs: (body, 1.0),
+    )
+    observed: list[dict[str, Any]] = []
+    reader = OllamaKnobReader(observer=observed.append, model="qwen-test")
+    result, duration = reader.read(Image.new("RGB", (4, 4)), "prompt", {})
+    assert duration == 1.0
+    assert result["status"] == "ok"
+    assert result["text"] == "sclio"
+    assert result["raw_response"] == body
+    assert observed == [body]
