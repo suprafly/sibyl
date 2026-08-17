@@ -44,3 +44,29 @@ Then rerun deterministically with:
 `confirmed: true` records an authoritative human confirmation for that candidate. `confirmed: false` records an explicit human suggestion but keeps the candidate unconfirmed. The review file is preserved by path in the JSON artifact; it is never inferred from model agreement.
 
 The Markdown is experimental. It is not copied to `transform.md`, and the command does not modify canonical `sibyl run`, page transcription, localization, source crops, or figure assets.
+
+## Unresolved text and graphical material
+
+Document convergence classifies weakly supported material from preserved
+evidence as `text`, `figure`, or `unknown`:
+
+```text
+uncertain text
+    → [unclear]
+
+graphical material already represented by figure
+    → figure projection
+
+unknown material
+    → preserve uncertainty/provenance
+```
+
+Existing drawing-region metadata, figure association, source geometry, and
+explicit graphical recognition evidence can associate a source crop with a
+figure. When that association is strong enough, the figure projection remains
+authoritative and the textual candidate is not emitted a second time. The
+recognition observations remain in `convergence.json` with a classification,
+its evidence basis, emission status, and figure representation so the
+suppression is inspectable. Uncertain handwriting without positive graphical
+evidence remains `[unclear]`; convergence does not infer text from a figure or
+replace unresolved handwriting with a semantic guess.

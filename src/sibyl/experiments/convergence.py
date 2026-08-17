@@ -368,18 +368,26 @@ def _canonical_observation(
     except (OSError, json.JSONDecodeError):
         return None, []
     refs: list[str] = []
+    figure_regions: list[dict[str, Any]] = []
     for region in value.get("regions", []) if isinstance(value, dict) else []:
         if isinstance(region, dict) and region.get("kind") == "figure":
+            bounds = region.get("bounds")
+            source_data = region.get("source")
+            if not isinstance(bounds, dict) and isinstance(source_data, dict):
+                bounds = source_data.get("bounds")
             crop = (
-                region.get("source", {}).get("crop")
-                if isinstance(region.get("source"), dict)
+                source_data.get("crop")
+                if isinstance(source_data, dict)
                 else None
             )
             if crop:
-                refs.append(f"![Figure {len(refs) + 1}](assets/{Path(crop).name})")
+                label = f"Figure {len(refs) + 1}"
+                refs.append(f"![{label}](assets/{Path(crop).name})")
+                figure_regions.append({"label": label, "bounds": bounds or {}, "crop": crop})
     return {
         "path": str(transform),
         "page_text": value.get("page_text", value.get("interpretation", {}).get("text", [])),
+        "figure_regions": figure_regions,
     }, refs
 
 
@@ -401,6 +409,90 @@ def _document_order(regions: list[dict[str, Any]]) -> list[dict[str, Any]]:
 
 def _candidate_tokens(candidate: str) -> list[str]:
     return [token for token in _tokenize(candidate) if token != "[unclear]"]
+
+
+def _bbox_overlap_ratio(first: dict[str, Any], second: dict[str, Any]) -> float:
+    try:
+        left = max(float(first["left"]), float(second["left"]))
+        top = max(float(first["top"]), float(second["top"]))
+        right = min(float(first["right"]), float(second["right"]))
+        bottom = min(float(first["bottom"]), float(second["bottom"]))
+        intersection = max(0.0, right - left) * max(0.0, bottom - top)
+        area = max(0.0, float(first["right"]) - float(first["left"])) * max(
+            0.0, float(first["bottom"]) - float(first["top"])
+        )
+    except (KeyError, TypeError, ValueError):
+        return 0.0
+    return intersection / area if area else 0.0
+
+
+def _explicit_graphical_evidence(value: Any) -> bool:
+    """Recognize only metadata that explicitly labels material as graphical."""
+    if isinstance(value, dict):
+        for key in ("kind", "type", "description", "label", "text"):
+            candidate = value.get(key)
+            if isinstance(candidate, str) and re.search(
+                r"\b(drawing|diagram|figure|graphic|graphical)\b", candidate, re.I
+            ):
+                return True
+        return any(_explicit_graphical_evidence(item) for item in value.values())
+    if isinstance(value, list):
+        return any(_explicit_graphical_evidence(item) for item in value)
+    return False
+
+
+def _classify_region(
+    region: dict[str, Any], figure_regions: list[dict[str, Any]], raw_evidence: Any = None
+) -> dict[str, Any]:
+    source_bbox = region.get("source_crop", {}).get("source_bbox", {})
+    if not isinstance(source_bbox, dict):
+        source_bbox = {}
+    matches = [
+        figure
+        for figure in figure_regions
+        if _bbox_overlap_ratio(source_bbox, figure.get("bounds", {})) >= 0.5
+    ]
+    if matches:
+        figure = matches[0]
+        return {
+            "kind": "figure",
+            "basis": ["overlaps_existing_figure", "drawing_region_evidence"],
+            "emitted": False,
+            "represented_by": figure["label"],
+        }
+    if _explicit_graphical_evidence(raw_evidence):
+        return {
+            "kind": "figure",
+            "basis": ["explicit_graphical_evidence"],
+            "emitted": False,
+            "represented_by": None,
+        }
+    if region.get("human_confirmed") or (
+        region.get("candidate") != "[unclear]" and not region.get("unresolved")
+    ):
+        return {"kind": "text", "basis": ["textual_recognition_evidence"], "emitted": True}
+    return {"kind": "unknown", "basis": [], "emitted": True}
+
+
+def _preserve_observed_capitalization(candidate: str, observations: list[str]) -> str:
+    """Use observed casing when a supported token differs only by casing."""
+    if candidate.strip() == "[unclear]":
+        return candidate
+    candidate_tokens = _tokenize(candidate)
+    observed_tokens = [token for text in observations for token in _tokenize(text)]
+    for index, token in enumerate(candidate_tokens):
+        if not re.fullmatch(r"[^\W\d_]+", token, flags=re.UNICODE) or not token.islower():
+            continue
+        alternatives = [
+            other
+            for other in observed_tokens
+            if re.fullmatch(r"[^\W\d_]+", other, flags=re.UNICODE)
+            and _token_similarity(token, other) >= 0.7
+            and other[0].isupper()
+        ]
+        if alternatives:
+            candidate_tokens[index] = token[:1].upper() + token[1:]
+    return _detokenize(candidate_tokens)
 
 
 def _same_line(first: dict[str, Any], second: dict[str, Any]) -> bool:
@@ -618,6 +710,7 @@ def _document_convergence(
                 else next(item for item in scores if item["candidate"] == "[unclear]")
             )
             chosen = chosen_score["candidate"]
+        classification = region.get("classification", {"kind": "text", "emitted": True})
         selected.append(chosen)
         decisions.append(
             {
@@ -629,11 +722,19 @@ def _document_convergence(
                 "basis": chosen_score["basis"],
                 "human_confirmed": human_confirmed,
                 "source_crop": region["source_crop"],
+                "classification": classification,
+                "emitted": classification.get("emitted", True),
             }
         )
     blocks: list[str] = []
     for index, decision in enumerate(decisions):
-        if index and _same_line(ordered[index - 1], ordered[index]):
+        if not decision["emitted"]:
+            continue
+        if (
+            index
+            and decisions[index - 1]["emitted"]
+            and _same_line(ordered[index - 1], ordered[index])
+        ):
             blocks[-1] = f"{blocks[-1]} {decision['selected']}".strip()
         else:
             blocks.append(decision["selected"])
@@ -706,10 +807,33 @@ def run_convergence(
             }
         )
     canonical, figures = _canonical_observation(input_path, artifact.get("source"))
+    figure_regions = canonical.get("figure_regions", []) if canonical else []
+    for region in converged:
+        raw_region = next(item for item in regions if item["region_id"] == region["region_id"])
+        region["classification"] = _classify_region(
+            region,
+            figure_regions,
+            {
+                "comparison": raw_region.get("comparison", {}),
+                "qwen": raw_region.get("qwen", {}),
+                "trocr": raw_region.get("trocr", {}),
+            },
+        )
+        if region["classification"]["kind"] == "figure":
+            region["classification"]["emitted"] = False
     page_lines = []
     if isinstance(canonical, dict) and isinstance(canonical.get("page_text"), list):
         page_lines = [line for line in canonical["page_text"] if isinstance(line, str)]
     document_regions, text_blocks = _document_convergence(converged, page_lines)
+    observed_text = [
+        item["text"]
+        for region in converged
+        for name in ("observations",)
+        for values in [region[name].get("qwen", []), region[name].get("trocr", [])]
+        for item in values
+        if isinstance(item, dict) and isinstance(item.get("text"), str)
+    ]
+    text_blocks = [_preserve_observed_capitalization(block, observed_text) for block in text_blocks]
     markdown = "\n\n".join(text_blocks + figures) + "\n"
     output = {
         "experiment": "convergence",

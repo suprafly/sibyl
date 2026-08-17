@@ -219,3 +219,80 @@ def test_figure_reference_is_preserved_from_canonical_observation(tmp_path: Path
     input_path.write_text(json.dumps(payload), encoding="utf-8")
     run_convergence(input_path, markdown_path=tmp_path / "out.md", json_path=tmp_path / "out.json")
     assert "![Figure 1](assets/figure-01.png)" in (tmp_path / "out.md").read_text()
+
+
+def _figure_source(tmp_path: Path, input_path: Path) -> None:
+    source = tmp_path / "page.png"
+    source.write_bytes(b"not an image")
+    canonical = tmp_path / "page.sibyl"
+    canonical.mkdir()
+    (canonical / "transform.json").write_text(
+        json.dumps(
+            {
+                "page_text": [],
+                "regions": [
+                    {
+                        "kind": "figure",
+                        "bounds": {"left": 100, "top": 100, "right": 300, "bottom": 300},
+                        "source": {"crop": "assets/figure-01.png"},
+                    }
+                ],
+            }
+        ),
+        encoding="utf-8",
+    )
+    payload = json.loads(input_path.read_text())
+    payload["source"] = str(source)
+    payload["regions"][0]["crop"]["source_bbox"] = {
+        "left": 120,
+        "top": 120,
+        "right": 280,
+        "bottom": 280,
+    }
+    input_path.write_text(json.dumps(payload), encoding="utf-8")
+
+
+def test_existing_figure_geometry_suppresses_duplicate_uncertainty_and_keeps_evidence(
+    tmp_path: Path,
+) -> None:
+    input_path = artifact(tmp_path, qwen=["diagram material"], trocr=["#"])
+    _figure_source(tmp_path, input_path)
+    result = run_convergence(
+        input_path, markdown_path=tmp_path / "out.md", json_path=tmp_path / "out.json"
+    )
+    classification = result["regions"][0]["classification"]
+    assert classification == {
+        "kind": "figure",
+        "basis": ["overlaps_existing_figure", "drawing_region_evidence"],
+        "emitted": False,
+        "represented_by": "Figure 1",
+    }
+    markdown = (tmp_path / "out.md").read_text()
+    assert markdown.count("![Figure 1](assets/figure-01.png)") == 1
+    assert "[unclear]" not in markdown
+    assert result["regions"][0]["observations"]["qwen"]
+    assert result["document_convergence"]["regions"][0]["emitted"] is False
+
+
+def test_uncertain_text_without_figure_evidence_remains_unclear(tmp_path: Path) -> None:
+    input_path = artifact(tmp_path, qwen=["alpha beta"], trocr=["gamma delta"])
+    result = run_convergence(
+        input_path, markdown_path=tmp_path / "out.md", json_path=tmp_path / "out.json"
+    )
+    assert result["regions"][0]["classification"]["kind"] == "unknown"
+    assert "[unclear]" in (tmp_path / "out.md").read_text()
+
+
+def test_observed_capitalization_is_projected_without_resolving_handwriting(
+    tmp_path: Path,
+) -> None:
+    input_path = artifact(
+        tmp_path,
+        qwen=["Splic grafting - what"] * 3,
+        trocr=["splice grafting - what"] * 3,
+    )
+    result = run_convergence(
+        input_path, markdown_path=tmp_path / "out.md", json_path=tmp_path / "out.json"
+    )
+    assert "Splice grafting" in (tmp_path / "out.md").read_text()
+    assert result["regions"][0]["candidate"] == "splice grafting - what"
