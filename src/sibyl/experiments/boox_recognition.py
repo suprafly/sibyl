@@ -242,12 +242,145 @@ def _line_catalog(path: Path, image_path: Path) -> list[dict[str, Any]]:
                 lines.append(
                     {
                         "reference_id": line_id,
+                        "region_id": region.get("region_id"),
                         "source_bbox": line.get("source_bbox"),
                         "bbox": bbox,
                         "source_artifact": str(path),
                     }
                 )
     return sorted(lines, key=lambda item: item["reference_id"])
+
+
+def _read_json(path: Path, label: str) -> dict[str, Any]:
+    if not path.is_file():
+        raise FileNotFoundError(f"{label} artifact not found: {path}")
+    try:
+        value = json.loads(path.read_text(encoding="utf-8"))
+    except json.JSONDecodeError as error:
+        raise ValueError(f"invalid {label} artifact: {path}") from error
+    if not isinstance(value, dict):
+        raise ValueError(f"invalid {label} artifact: {path}")
+    return value
+
+
+def _resolve_path(value: str, base: Path) -> Path:
+    path = Path(value)
+    if path.is_absolute() or path.is_file():
+        return path
+    return base / path
+
+
+def _source_matches(artifact: dict[str, Any], image_path: Path) -> bool:
+    source = artifact.get("source")
+    return isinstance(source, str) and Path(source).resolve() == image_path.resolve()
+
+
+def _bbox_overlap_ratio(first: dict[str, Any], second: dict[str, Any]) -> float:
+    try:
+        left = max(float(first["left"]), float(second["left"]))
+        top = max(float(first["top"]), float(second["top"]))
+        right = min(float(first["right"]), float(second["right"]))
+        bottom = min(float(first["bottom"]), float(second["bottom"]))
+        intersection = max(0.0, right - left) * max(0.0, bottom - top)
+        area = max(0.0, float(first["right"]) - float(first["left"])) * max(
+            0.0, float(first["bottom"]) - float(first["top"])
+        )
+    except (KeyError, TypeError, ValueError):
+        return 0.0
+    return intersection / area if area else 0.0
+
+
+def _canonical_figure_regions(image_path: Path) -> list[dict[str, Any]]:
+    """Read existing canonical figure classification without invoking inference."""
+    transform_path = image_path.parent / f"{image_path.stem}.sibyl" / "transform.json"
+    if not transform_path.is_file():
+        return []
+    try:
+        artifact = json.loads(transform_path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return []
+    if not isinstance(artifact, dict):
+        return []
+    source = artifact.get("source")
+    source_image = source.get("image") if isinstance(source, dict) else source
+    if not isinstance(source_image, str) or Path(source_image).resolve() != image_path.resolve():
+        return []
+    figures: list[dict[str, Any]] = []
+    for region in artifact.get("regions", []):
+        if not isinstance(region, dict) or region.get("kind") != "figure":
+            continue
+        source = region.get("source")
+        bounds = region.get("bounds")
+        if not isinstance(bounds, dict) and isinstance(source, dict):
+            bounds = source.get("bounds")
+        if isinstance(bounds, dict):
+            figures.append({"bounds": bounds, "region": region})
+    return figures
+
+
+def _coarse_recovery_targets(
+    compare_path: Path, reread_path: Path, image_path: Path
+) -> list[dict[str, Any]]:
+    """Build document blocks from accepted coarse crops, retaining line evidence."""
+    compare = _read_json(compare_path, "trocr_compare")
+    reread = _read_json(reread_path, "transcription_reread")
+    if not _source_matches(compare, image_path):
+        raise ValueError("trocr-compare artifact source does not match IMAGE")
+    if not _source_matches(reread, image_path):
+        raise ValueError("transcription-reread artifact source does not match IMAGE")
+    reread_regions = {
+        region.get("region_id"): region
+        for region in reread.get("regions", [])
+        if isinstance(region, dict) and isinstance(region.get("region_id"), str)
+    }
+    figures = _canonical_figure_regions(image_path)
+    targets: list[dict[str, Any]] = []
+    for region in compare.get("regions", []):
+        if not isinstance(region, dict) or not isinstance(region.get("region_id"), str):
+            continue
+        crop = region.get("crop")
+        if not isinstance(crop, dict) or not isinstance(crop.get("path"), str):
+            continue
+        source_bbox = crop.get("source_bbox")
+        if isinstance(source_bbox, dict) and any(
+            _bbox_overlap_ratio(source_bbox, figure["bounds"]) >= 0.5 for figure in figures
+        ):
+            continue
+        region_id = region["region_id"]
+        reread_region = reread_regions.get(region_id, {})
+        line_localization = reread_region.get("line_localization", {})
+        line_regions = line_localization.get("regions", [])
+        line_evidence = {
+            "parent_region_id": region_id,
+            "source_artifact": str(reread_path),
+            "status": line_localization.get("status"),
+            "error": line_localization.get("error"),
+            "raw_response": line_localization.get("raw_response"),
+            "rejected_regions": line_localization.get("rejected_regions", []),
+            "regions": line_regions if isinstance(line_regions, list) else [],
+        }
+        targets.append(
+            {
+                "target_id": region_id,
+                "kind": "region",
+                "path": _resolve_path(crop["path"], compare_path.parent.parent),
+                "source_bbox": source_bbox,
+                "source_coordinate_space": crop.get("source_coordinate_space"),
+                "source_artifact": str(compare_path),
+                "metadata": crop,
+                "line_evidence": line_evidence,
+            }
+        )
+    targets.sort(
+        key=lambda target: (
+            (target.get("source_bbox") or {}).get("top", 0),
+            (target.get("source_bbox") or {}).get("left", 0),
+            target["target_id"],
+        )
+    )
+    if not targets:
+        raise ValueError("no accepted coarse text-region targets were found")
+    return targets
 
 
 def _load_review(path: Path | None) -> dict[str, str]:
@@ -528,14 +661,7 @@ def run_boox_recognition(
     catalog = _line_catalog(reread_path, image_path)
     if lines is None and regions is None:
         if markdown:
-            targets = _targets(
-                image_path,
-                regions=None,
-                lines=",".join(line["reference_id"] for line in catalog),
-                crop_path=None,
-                compare_path=compare_path,
-                reread_path=reread_path,
-            )
+            targets = _coarse_recovery_targets(compare_path, reread_path, image_path)
         else:
             targets = _targets(
                 image_path,
@@ -567,7 +693,7 @@ def run_boox_recognition(
         )
     if markdown:
         target_order = {
-            line["reference_id"]: index for index, line in enumerate(catalog)
+            target["target_id"]: index for index, target in enumerate(targets)
         }
         targets.sort(key=lambda target: target_order.get(target["target_id"], len(catalog)))
     native = _verified_page(note_path)
@@ -643,6 +769,16 @@ def run_boox_recognition(
             "source_bbox": target.get("source_bbox"),
             "native_bbox": target_native_bbox,
         }
+        if markdown:
+            target_record["line_evidence"] = target.get("line_evidence", {
+                "parent_region_id": target_id,
+                "source_artifact": str(reread_path),
+                "status": "not_available",
+                "error": "no line-localization record for coarse region",
+                "raw_response": None,
+                "rejected_regions": [],
+                "regions": [],
+            })
         artifact["targets"].append(target_record)
         checkpoint()
         other_lines = [
@@ -654,20 +790,37 @@ def run_boox_recognition(
         ]
         other_lines = [line for line in other_lines if line["reference_id"] != target_id]
         if markdown:
-            target_region = _line_region({"target_id": target_id})
-            other_lines = [
-                line for line in other_lines if _line_region(line) == target_region
-            ]
-            reference_selection = {
-                "policy": "same_region_excluding_target",
-                "target_region": target_region,
-                "eligible_reference_lines": [line["reference_id"] for line in other_lines],
-                "reason": (
-                    "same_region_references_selected"
-                    if other_lines
-                    else "insufficient_same_region_references"
-                ),
-            }
+            if target["kind"] == "region":
+                other_lines = [
+                    line for line in other_lines if line.get("region_id") != target_id
+                ]
+                reference_selection = {
+                    "policy": "other_coarse_regions_excluding_target",
+                    "target_region": target_id,
+                    "eligible_reference_lines": [
+                        line["reference_id"] for line in other_lines
+                    ],
+                    "reason": (
+                        "other_region_references_selected"
+                        if other_lines
+                        else "insufficient_other_region_references"
+                    ),
+                }
+            else:
+                target_region = _line_region({"target_id": target_id})
+                other_lines = [
+                    line for line in other_lines if _line_region(line) == target_region
+                ]
+                reference_selection = {
+                    "policy": "same_region_excluding_target",
+                    "target_region": target_region,
+                    "eligible_reference_lines": [line["reference_id"] for line in other_lines],
+                    "reason": (
+                        "same_region_references_selected"
+                        if other_lines
+                        else "insufficient_same_region_references"
+                    ),
+                }
         else:
             reference_selection = {
                 "policy": "configured_experiment_references",

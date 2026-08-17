@@ -75,6 +75,126 @@ def test_matched_native_rendering_records_presentation_parameters(tmp_path: Path
     }
 
 
+def test_coarse_recovery_targets_preserve_parent_coverage_and_exclude_figures(
+    tmp_path: Path,
+) -> None:
+    image_path = tmp_path / "page.png"
+    Image.new("RGB", (100, 100), "white").save(image_path)
+    crop_paths = {}
+    for region_id in ("region-01", "region-02", "region-03"):
+        crop_paths[region_id] = tmp_path / f"{region_id}.png"
+        Image.new("RGB", (20, 20), "white").save(crop_paths[region_id])
+    compare_path = tmp_path / "trocr-compare.json"
+    compare_path.write_text(
+        json.dumps(
+            {
+                "source": str(image_path),
+                "regions": [
+                    {
+                        "region_id": "region-02",
+                        "crop": {
+                            "path": str(crop_paths["region-02"]),
+                            "source_bbox": {"left": 10, "top": 40, "right": 90, "bottom": 60},
+                        },
+                    },
+                    {
+                        "region_id": "region-03",
+                        "crop": {
+                            "path": str(crop_paths["region-03"]),
+                            "source_bbox": {"left": 10, "top": 70, "right": 90, "bottom": 90},
+                        },
+                    },
+                    {
+                        "region_id": "region-01",
+                        "crop": {
+                            "path": str(crop_paths["region-01"]),
+                            "source_bbox": {"left": 10, "top": 10, "right": 90, "bottom": 30},
+                        },
+                    },
+                ],
+            }
+        ),
+        encoding="utf-8",
+    )
+    reread_path = tmp_path / "transcription-reread.json"
+    reread_path.write_text(
+        json.dumps(
+            {
+                "source": str(image_path),
+                "regions": [
+                    {
+                        "region_id": "region-01",
+                        "line_localization": {
+                            "status": "ok",
+                            "regions": [],
+                            "rejected_regions": [],
+                        },
+                    },
+                    {
+                        "region_id": "region-02",
+                        "line_localization": {
+                            "status": "truncated_response",
+                            "raw_response": {"thinking": "partial"},
+                            "rejected_regions": [
+                                {"index": 1, "reason": "overlap"}
+                            ],
+                            "regions": [
+                                {
+                                    "line_id": "region-02-line-01",
+                                    "source_bbox": {
+                                        "left": 20,
+                                        "top": 42,
+                                        "right": 80,
+                                        "bottom": 50,
+                                    },
+                                    "path": str(tmp_path / "line.png"),
+                                },
+                                {
+                                    "line_id": "region-02-line-spurious",
+                                    "source_bbox": {
+                                        "left": 15,
+                                        "top": 41,
+                                        "right": 85,
+                                        "bottom": 59,
+                                    },
+                                    "path": str(tmp_path / "spurious.png"),
+                                },
+                            ],
+                        },
+                    },
+                ],
+            }
+        ),
+        encoding="utf-8",
+    )
+    transform_path = tmp_path / "page.sibyl" / "transform.json"
+    transform_path.parent.mkdir()
+    transform_path.write_text(
+        json.dumps(
+            {
+                "source": str(image_path),
+                "regions": [
+                    {
+                        "kind": "figure",
+                        "bounds": {"left": 5, "top": 65, "right": 95, "bottom": 95},
+                    }
+                ],
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    targets = experiment._coarse_recovery_targets(compare_path, reread_path, image_path)
+
+    assert [target["target_id"] for target in targets] == ["region-01", "region-02"]
+    assert all(target["kind"] == "region" for target in targets)
+    assert targets[0]["line_evidence"]["regions"] == []
+    assert targets[1]["line_evidence"]["regions"][1]["line_id"] == "region-02-line-spurious"
+    assert targets[1]["line_evidence"]["rejected_regions"] == [
+        {"index": 1, "reason": "overlap"}
+    ]
+
+
 def test_condition_selection_is_canonical_and_rejects_unknown_values() -> None:
     assert experiment.selected_conditions("leave-one-region-out,baseline") == (
         "baseline",
@@ -372,6 +492,9 @@ def test_markdown_recovery_enumerates_lines_and_writes_auditable_projection(
         for identifier in target_paths
     ]
     monkeypatch.setattr(experiment, "_targets", lambda *args, **kwargs: targets)
+    monkeypatch.setattr(
+        experiment, "_coarse_recovery_targets", lambda *args, **kwargs: targets
+    )
     monkeypatch.setattr(experiment, "_line_catalog", lambda *args, **kwargs: catalog)
     monkeypatch.setattr(
         experiment,

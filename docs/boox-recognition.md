@@ -101,8 +101,11 @@ uv run sibyl experiment boox-recognition \
 ```
 
 Page recovery is the note-aware projection of this experiment. Invoke it
-without line enumeration to discover all eligible line targets, select
-same-region references with structural target exclusion, and write
+without line enumeration to discover accepted coarse text-region targets in
+reading order. Line localization is optional nested evidence; line children
+are never emitted as independent document blocks. References for a coarse
+target come only from other coarse regions, with structural target exclusion.
+The command writes
 `<image-stem>.sibyl/recovery.md` plus `recovery.json` evidence:
 
 ```sh
