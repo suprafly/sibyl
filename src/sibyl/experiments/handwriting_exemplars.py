@@ -75,7 +75,14 @@ def _query(
         "stream": False,
         "think": False,
         "keep_alive": 0,
-        "options": {"num_predict": controls["num_predict"]},
+        "options": {
+            key: value
+            for key, value in {
+                "num_predict": controls["num_predict"],
+                "num_ctx": controls.get("num_ctx"),
+            }.items()
+            if value is not None
+        },
         "messages": [
             {
                 "role": "user",

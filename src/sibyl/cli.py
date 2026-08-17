@@ -11,6 +11,7 @@ from pathlib import Path
 from sibyl import __version__
 from sibyl.corpus import format_corpus_result, prepare_boox_corpus
 from sibyl.experiments.boox_recognition import (
+    BOOX_RECOGNITION_NUM_CTX,
     BOOX_RECOGNITION_NUM_PREDICT,
     format_boox_recognition,
     run_boox_recognition,
@@ -257,6 +258,12 @@ def build_parser() -> argparse.ArgumentParser:
         type=int,
         default=BOOX_RECOGNITION_NUM_PREDICT,
         help="maximum output tokens per read",
+    )
+    boox_recognition.add_argument(
+        "--num-ctx",
+        type=int,
+        default=BOOX_RECOGNITION_NUM_CTX,
+        help="Ollama context size per read",
     )
     boox_recognition.add_argument(
         "--conditions",
@@ -506,6 +513,7 @@ def main(argv: Sequence[str] | None = None) -> int:
                 lines=arguments.lines,
                 runs=arguments.runs,
                 num_predict=arguments.num_predict,
+                num_ctx=arguments.num_ctx,
                 conditions=arguments.conditions,
                 review_path=arguments.review,
                 output_path=arguments.output,

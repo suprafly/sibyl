@@ -14,7 +14,8 @@ The experiment uses the verified page-4 BOOX decode: 167 strokes, 17,272
 points, 1404×1872 native dimensions, identity coordinates, and verified
 stroke/point associations. It reuses the existing Qwen adapter and fixed
 recognition controls, with an experiment-only default `num_predict` budget of
-1024 (override with `--num-predict N`). This does not change canonical Sibyl
+1024 (override with `--num-predict N`) and an experiment-only context size of
+8192 (override with `--num-ctx N`). This does not change canonical Sibyl
 recognition. Each condition is repeated for the requested number of reads while
 preserving raw and parsed responses, failures, prompts, controls, candidate
 distributions, and stability.

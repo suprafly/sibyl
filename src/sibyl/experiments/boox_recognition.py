@@ -33,6 +33,7 @@ DEFAULT_REREAD = Path(".sibyl/experiments/transcription-reread.json")
 DEFAULT_COMPARE = Path(".sibyl/experiments/trocr-compare.json")
 DEFAULT_RUNS = 5
 BOOX_RECOGNITION_NUM_PREDICT = 1024
+BOOX_RECOGNITION_NUM_CTX = 8192
 PAGE = 4
 NATIVE_SIZE = (1404, 1872)
 CONDITIONS = (
@@ -344,6 +345,7 @@ def run_boox_recognition(
     lines: str | None = None,
     runs: int = DEFAULT_RUNS,
     num_predict: int = BOOX_RECOGNITION_NUM_PREDICT,
+    num_ctx: int = BOOX_RECOGNITION_NUM_CTX,
     conditions: str | None = None,
     review_path: Path | None = None,
     output_path: Path = DEFAULT_OUTPUT,
@@ -355,6 +357,8 @@ def run_boox_recognition(
         raise ValueError("runs must be positive")
     if num_predict <= 0:
         raise ValueError("num_predict must be positive")
+    if num_ctx <= 0:
+        raise ValueError("num_ctx must be positive")
     requested_conditions = selected_conditions(conditions)
     if not image_path.is_file():
         raise FileNotFoundError(f"Image not found: {image_path}")
@@ -409,6 +413,7 @@ def run_boox_recognition(
         "top_p": "unspecified (Ollama/model default)",
         "seed": "unspecified (Ollama/model default)",
         "num_predict": num_predict,
+        "num_ctx": num_ctx,
         "think": False,
         "stream": False,
         "keep_alive": 0,

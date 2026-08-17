@@ -242,6 +242,7 @@ def test_run_preserves_conditions_provenance_and_nonleaking_review(
     ]
     assert artifact["results"][0]["image_order"] == ["line-target"]
     assert artifact["request_controls"]["num_predict"] == 1024
+    assert artifact["request_controls"]["num_ctx"] == 8192
     assert artifact["results"][2]["reference_stroke_ids"] == ["reference-stroke"]
     assert "answer" not in artifact["results"][2]["prompt"]
     assert artifact["results"][2]["analysis"]["evaluation"]["ground_truth"] == "answer"
