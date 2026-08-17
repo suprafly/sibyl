@@ -694,8 +694,8 @@ def run_reread_experiment(
         "runs_requested": requested,
         "request_controls": {},
     }
-    for number, located in enumerate(accepted, start=1):
-        region_id = f"region-{number:02d}"
+    for located in accepted:
+        region_id = f"region-{located['index'] + 1:02d}"
         crop_info = _source_crop(source, prepared, located["bbox_2d"], output_path, region_id)
         crop_image = cast(Image.Image, crop_info.pop("image"))
         reads, reader_model = _read_crop(crop_image, requested, reader_factory)

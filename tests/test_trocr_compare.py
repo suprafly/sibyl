@@ -127,3 +127,23 @@ def test_explicit_region_selection_is_generic(tmp_path: Path) -> None:
         trocr_factory=lambda: (FakeTrOCR(), {}),
     )
     assert [region["region_id"] for region in artifact["regions"]] == ["region-01"]
+
+
+def test_region_selection_preserves_localization_indexes_after_duplicates(tmp_path: Path) -> None:
+    class SparseLocalizer(FakeLocalizer):
+        def localize(self, image: Image.Image) -> tuple[dict[str, Any], float]:
+            boxes = [[100 + index * 20, 100, 110 + index * 20, 200] for index in range(5)]
+            boxes.extend([boxes[0], boxes[0], boxes[0], boxes[0]])
+            boxes.append([900, 100, 990, 200])
+            return {"text_regions": [{"bbox_2d": box} for box in boxes]}, 1.0
+
+    artifact = run_compare_experiment(
+        _page(tmp_path / "page.png"),
+        runs=1,
+        regions="region-10",
+        output_path=tmp_path / "artifact.json",
+        localizer_factory=SparseLocalizer,
+        reader_factory=FakeQwen,
+        trocr_factory=lambda: (FakeTrOCR(), {}),
+    )
+    assert [region["region_id"] for region in artifact["regions"]] == ["region-10"]

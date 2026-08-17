@@ -41,7 +41,7 @@ def test_cross_model_agreement_and_provenance(tmp_path: Path) -> None:
     )
     region = result["regions"][0]
     assert region["candidate"] == "Xylem"
-    assert "cross_model_agreement" in region["basis"]
+    assert "cross_model_overlap" in region["basis"]
     assert region["source_crop"]["sha256"] == "hash-1"
     assert len(region["observations"]["qwen"]) == 2
 
@@ -53,6 +53,53 @@ def test_disagreement_is_not_majority_voting(tmp_path: Path) -> None:
     )
     assert result["regions"][0]["candidate"] == "[unclear]"
     assert result["regions"][0]["human_confirmed"] is False
+
+
+def test_variable_qwen_and_stable_trocr_use_partial_phrase(tmp_path: Path) -> None:
+    input_path = artifact(
+        tmp_path,
+        qwen=["Splic grafting - what", "Splia grafting - what", "Splea grafting - what"],
+        trocr=["splice grafting - what", "splice grafting - what", "splice grafting - what"],
+    )
+    result = run_convergence(
+        input_path, markdown_path=tmp_path / "out.md", json_path=tmp_path / "out.json"
+    )
+    region = result["regions"][0]
+    assert region["candidate"] == "splice grafting - what"
+    assert "cross_model_overlap" in region["basis"]
+    assert region["evidence"]["cross_model_overlap"]
+    assert region["evidence"]["common_phrases"][0]["token_count"] >= 2
+
+
+def test_partial_sentence_constructs_candidate_from_token_support(tmp_path: Path) -> None:
+    input_path = artifact(
+        tmp_path,
+        qwen=[
+            "- transports mineral nutrients on water from root to",
+            "- transpirs mineral nutrients on water from root to",
+            "- transports mineral nutrients on water from root to",
+        ],
+        trocr=["- transports interval not trans"] * 3,
+    )
+    result = run_convergence(
+        input_path, markdown_path=tmp_path / "out.md", json_path=tmp_path / "out.json"
+    )
+    candidate = result["regions"][0]["candidate"]
+    assert candidate.startswith("- transports mineral nutrients")
+    assert candidate != "[unclear]"
+
+
+def test_incompatible_readings_remain_unclear_and_output_is_deterministic(tmp_path: Path) -> None:
+    input_path = artifact(tmp_path, qwen=["alpha beta"], trocr=["gamma delta"])
+    first = run_convergence(
+        input_path, markdown_path=tmp_path / "one.md", json_path=tmp_path / "one.json"
+    )
+    second = run_convergence(
+        input_path, markdown_path=tmp_path / "two.md", json_path=tmp_path / "two.json"
+    )
+    assert first["regions"][0]["candidate"] == "[unclear]"
+    assert first["regions"] == second["regions"]
+    assert "alpha" not in Path("src/sibyl/experiments/convergence.py").read_text()
 
 
 def test_human_review_overrides_ambiguity_and_is_traceable(tmp_path: Path) -> None:
@@ -105,7 +152,5 @@ def test_figure_reference_is_preserved_from_canonical_observation(tmp_path: Path
     payload = json.loads(input_path.read_text())
     payload["source"] = str(source)
     input_path.write_text(json.dumps(payload), encoding="utf-8")
-    run_convergence(
-        input_path, markdown_path=tmp_path / "out.md", json_path=tmp_path / "out.json"
-    )
+    run_convergence(input_path, markdown_path=tmp_path / "out.md", json_path=tmp_path / "out.json")
     assert "![Figure 1](assets/figure-01.png)" in (tmp_path / "out.md").read_text()

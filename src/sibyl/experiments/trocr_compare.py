@@ -235,7 +235,8 @@ def run_compare_experiment(
     rejected.extend(duplicates)
     accepted.sort(key=lambda item: item["index"])
     if wanted is not None:
-        missing = wanted - {f"region-{index:02d}" for index in range(1, len(accepted) + 1)}
+        available = {f"region-{located['index'] + 1:02d}" for located in accepted}
+        missing = wanted - available
         if missing:
             raise ValueError(f"unknown region IDs: {', '.join(sorted(missing))}")
 
@@ -281,8 +282,11 @@ def run_compare_experiment(
         "trocr": {"model": TROCR_MODEL_ID, "metadata": trocr_metadata},
         "regions": [],
     }
-    for number, located in enumerate(accepted, start=1):
-        region_id = f"region-{number:02d}"
+    for located in accepted:
+        # Keep the localization identity stable across duplicate rejection.  A
+        # later accepted region is still region-10, not region-06, when the
+        # source localization contained rejected entries before it.
+        region_id = f"region-{located['index'] + 1:02d}"
         if wanted is not None and region_id not in wanted:
             continue
         crop_info = _source_crop(source, prepared, located["bbox_2d"], output_path, region_id)

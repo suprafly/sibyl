@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import re
+from difflib import SequenceMatcher
 from pathlib import Path
 from typing import Any
 
@@ -117,8 +118,139 @@ def _successful(group: Any) -> list[dict[str, Any]]:
     ]
 
 
-def _tokens(text: str) -> set[str]:
-    return set(re.findall(r"[\w]+", normalize_reading(text).lower()))
+def _tokenize(text: str) -> list[str]:
+    return re.findall(r"[\w]+|[^\w\s]", normalize_reading(text), flags=re.UNICODE)
+
+
+def _token_similarity(first: str, second: str) -> float:
+    if first.lower() == second.lower():
+        return 1.0
+    if not (first.isalnum() and second.isalnum()) or first[0].lower() != second[0].lower():
+        return 0.0
+    return SequenceMatcher(None, first.lower(), second.lower(), autojunk=False).ratio()
+
+
+def _align(template: list[str], reading: list[str]) -> dict[int, list[str]]:
+    aligned: dict[int, list[str]] = {}
+    matcher = SequenceMatcher(None, template, reading, autojunk=False)
+    for tag, left, right, other_left, other_right in matcher.get_opcodes():
+        if tag == "equal":
+            for offset in range(right - left):
+                aligned.setdefault(left + offset, []).append(reading[other_left + offset])
+        elif tag == "replace":
+            width = min(right - left, other_right - other_left)
+            for offset in range(width):
+                if _token_similarity(template[left + offset], reading[other_left + offset]) >= 0.5:
+                    aligned.setdefault(left + offset, []).append(reading[other_left + offset])
+    return aligned
+
+
+def _template(readings: list[list[str]]) -> list[str]:
+    if not readings:
+        return []
+    scored = [
+        (
+            sum(
+                SequenceMatcher(None, candidate, other, autojunk=False).ratio()
+                for other in readings
+            ),
+            -len(candidate),
+            candidate,
+        )
+        for candidate in readings
+    ]
+    return max(scored, key=lambda item: (item[0], item[1]))[2]
+
+
+def _detokenize(tokens: list[str]) -> str:
+    output = ""
+    for token in tokens:
+        if token == "[unclear]":
+            output += (" " if output and not output.endswith(" ") else "") + token
+        elif token in {".", ",", ";", ":", "!", "?", "%", "~"}:
+            output = output.rstrip() + token
+        elif token == "-" and not output:
+            output = "- "
+        else:
+            output += (" " if output and not output.endswith((" ", "- ")) else "") + token
+    return output.strip()
+
+
+def _recognizer_consensus(readings: list[str]) -> dict[str, Any]:
+    token_readings = [_tokenize(reading) for reading in readings if reading.strip()]
+    if not token_readings:
+        return {"text": "", "tokens": [], "stable_tokens": [], "variants": [], "stable": False}
+    template = _template(token_readings)
+    aligned = [_align(template, reading) for reading in token_readings]
+    threshold = max(1, (len(token_readings) + 1) // 2)
+    tokens: list[str] = []
+    stable: list[str] = []
+    variants: list[dict[str, Any]] = []
+    for position, original in enumerate(template):
+        observed = [token for item in aligned if position in item for token in item[position]]
+        choices = [item for item in observed if _token_similarity(original, item) >= 0.5]
+        if len(choices) < threshold:
+            tokens.append("[unclear]")
+            variants.append({"token": original, "observed": choices, "support": len(choices)})
+            continue
+        representative = max(
+            dict.fromkeys(choices),
+            key=lambda item: (
+                sum(_token_similarity(item, other) for other in choices),
+                choices.count(item),
+                -len(item),
+            ),
+        )
+        tokens.append(representative)
+        stable.append(representative)
+        if len(set(choices)) > 1:
+            variants.append({"token": representative, "observed": choices, "support": len(choices)})
+    return {
+        "text": _detokenize(tokens),
+        "tokens": tokens,
+        "stable_tokens": stable,
+        "variants": variants,
+        "stable": len(stable) == len(template) and bool(template),
+    }
+
+
+def _cross_model_matches(first: list[str], second: list[str]) -> list[dict[str, Any]]:
+    matches: list[dict[str, Any]] = []
+    for left_index, left in enumerate(first):
+        for right_index, right in enumerate(second):
+            similarity = _token_similarity(left, right)
+            if similarity >= 0.5:
+                matches.append(
+                    {
+                        "qwen_token": left,
+                        "trocr_token": right,
+                        "similarity": round(similarity, 3),
+                        "qwen_index": left_index,
+                        "trocr_index": right_index,
+                    }
+                )
+    return matches
+
+
+def _common_phrases(first: list[str], second: list[str]) -> list[dict[str, Any]]:
+    phrases: list[dict[str, Any]] = []
+    start: int | None = None
+    for index, (left, right) in enumerate(zip(first, second, strict=False)):
+        compatible = _token_similarity(left, right) >= 0.5
+        if compatible and start is None:
+            start = index
+        if (not compatible or index == min(len(first), len(second)) - 1) and start is not None:
+            end = index if compatible else index - 1
+            if end - start + 1 >= 2:
+                phrases.append(
+                    {
+                        "qwen": _detokenize(first[start : end + 1]),
+                        "trocr": _detokenize(second[start : end + 1]),
+                        "token_count": end - start + 1,
+                    }
+                )
+            start = None
+    return phrases
 
 
 def _candidate(region: dict[str, Any], review: dict[str, Any] | None) -> dict[str, Any]:
@@ -131,65 +263,92 @@ def _candidate(region: dict[str, Any], review: dict[str, Any] | None) -> dict[st
     normalized = {
         name: [normalize_reading(text) for text in texts] for name, texts in observations.items()
     }
+    qwen_consensus = _recognizer_consensus(normalized["qwen"])
+    trocr_consensus = _recognizer_consensus(normalized["trocr"])
+    matches = _cross_model_matches(qwen_consensus["tokens"], trocr_consensus["tokens"])
+    common_phrases = _common_phrases(qwen_consensus["tokens"], trocr_consensus["tokens"])
+    evidence = {
+        "qwen_stability": qwen_consensus,
+        "trocr_stability": trocr_consensus,
+        "cross_model_overlap": matches,
+        "common_phrases": common_phrases,
+        "lexical_support": qwen_consensus["stable_tokens"] + trocr_consensus["stable_tokens"],
+        "unresolved_tokens": [token for token in qwen_consensus["tokens"] if token == "[unclear]"],
+    }
     if review is not None:
-        text = str(review["text"])
         return {
-            "candidate": text,
+            "candidate": str(review["text"]),
             "basis": ["human_review"],
             "human_confirmed": review["confirmed"],
             "unresolved": [],
+            "evidence": evidence,
         }
 
-    q_values = list(dict.fromkeys(normalized["qwen"]))
-    t_values = list(dict.fromkeys(normalized["trocr"]))
-    exact = [value for value in q_values if value in t_values]
-    if exact:
-        value = exact[0]
+    q_tokens = list(qwen_consensus["tokens"])
+    t_tokens = list(trocr_consensus["tokens"])
+    compatible_run = 0
+    for q_token, t_token in zip(q_tokens, t_tokens, strict=False):
+        if _token_similarity(q_token, t_token) >= 0.5:
+            compatible_run += 1
+        else:
+            break
+    if trocr_consensus["stable"] and compatible_run >= 3 and compatible_run >= len(t_tokens) * 0.75:
         return {
-            "candidate": value,
-            "basis": ["cross_model_agreement", "stable_recognizer"],
+            "candidate": trocr_consensus["text"],
+            "basis": ["trocr_stability", "cross_model_overlap", "lexical_support"],
             "human_confirmed": False,
             "unresolved": [],
+            "evidence": evidence,
         }
-
-    # A stable reading can help when the other recognizer shares most of its words,
-    # but a stable isolated error is not promoted to a transcription.
-    stable_q = len(q_values) == 1 and q_values
-    stable_t = len(t_values) == 1 and t_values
-    if stable_q and stable_t and _tokens(stable_q[0]) and _tokens(stable_t[0]):
-        overlap = len(_tokens(stable_q[0]) & _tokens(stable_t[0])) / max(
-            len(_tokens(stable_q[0]) | _tokens(stable_t[0])), 1
-        )
-        if overlap >= 0.6:
-            return {
-                "candidate": stable_q[0],
-                "basis": ["cross_model_partial_agreement", "stable_recognizer"],
-                "human_confirmed": False,
-                "unresolved": ["lexical differences remain"],
-            }
-
-    if len(q_values) == 1 and not t_values:
+    for match in matches:
+        index = match["qwen_index"]
+        other = t_tokens[match["trocr_index"]]
+        if (
+            match["similarity"] >= 0.7
+            and other != q_tokens[index]
+            and any(
+                other == variant
+                for item in qwen_consensus["variants"]
+                for variant in item["observed"]
+            )
+        ):
+            q_tokens[index] = other
+    candidate = _detokenize(q_tokens)
+    if (
+        q_tokens
+        and any(token != "[unclear]" for token in q_tokens)
+        and (matches or not normalized["trocr"])
+    ):
+        basis = ["qwen_stability" if qwen_consensus["stable"] else "qwen_phrase_support"]
+        if matches:
+            basis.append("cross_model_overlap")
+        if qwen_consensus["variants"]:
+            basis.append("lexical_support")
         return {
-            "candidate": q_values[0],
-            "basis": ["qwen_stable"],
+            "candidate": candidate,
+            "basis": basis,
             "human_confirmed": False,
-            "unresolved": ["TrOCR has no successful observation"],
+            "unresolved": evidence["unresolved_tokens"],
+            "evidence": evidence,
         }
-    if len(t_values) == 1 and not q_values:
+    if not normalized["qwen"] and trocr_consensus["stable"]:
         return {
-            "candidate": t_values[0],
-            "basis": ["trocr_stable"],
+            "candidate": trocr_consensus["text"],
+            "basis": ["trocr_stability"],
             "human_confirmed": False,
-            "unresolved": ["Qwen has no successful observation"],
+            "unresolved": [],
+            "evidence": evidence,
         }
-    unresolved = [
-        "recognizers disagree" if q_values and t_values else "no successful recognition evidence"
-    ]
     return {
         "candidate": "[unclear]",
         "basis": [],
         "human_confirmed": False,
-        "unresolved": unresolved,
+        "unresolved": [
+            "recognizers disagree"
+            if q_tokens and trocr_consensus["tokens"]
+            else "no successful recognition evidence"
+        ],
+        "evidence": evidence,
     }
 
 

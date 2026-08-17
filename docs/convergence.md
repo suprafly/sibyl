@@ -6,9 +6,9 @@ Sibyl’s experimental evidence path is:
 OBSERVE → PRESERVE → COMPARE → CONVERGE → PROJECT
 ```
 
-`converge` consumes the preserved `.sibyl/experiments/trocr-compare.json` artifact. It does not call Qwen, TrOCR, another LLM, or any other recognizer. It compares repeated readings deterministically, normalizes presentation-only differences, retains lexical differences, and emits a candidate Markdown projection plus JSON provenance. Model agreement is evidence, not truth: stable model output can still be wrong, and disagreement remains `[unclear]` unless the evidence is compatible or a human explicitly reviews it.
+`converge` consumes the preserved `.sibyl/experiments/trocr-compare.json` artifact. It does not call Qwen, TrOCR, another LLM, or any other recognizer. It compares repeated readings deterministically, normalizes presentation-only differences, clusters close lexical variants, extracts common token phrases, and emits a candidate Markdown projection plus JSON provenance. Model agreement is evidence, not truth: stable model output can still be wrong, and disagreement remains `[unclear]` unless the evidence is compatible or a human explicitly reviews it.
 
-The JSON distinguishes model observations, recognizer stability, cross-model agreement, the candidate transcription, unresolved disagreements, source crop hashes, and human confirmation. A canonical page artifact, when discoverable beside the input source, is recorded as a page-level observation and may supply existing figure references; it is not silently promoted to ground truth.
+The JSON distinguishes model observations, recognizer stability, cross-model token overlap, common phrases, the candidate transcription, unresolved disagreements, source crop hashes, and human confirmation. A canonical page artifact, when discoverable beside the input source, is recorded as a page-level observation and may supply existing figure references; it is not silently promoted to ground truth.
 
 ## Run
 
