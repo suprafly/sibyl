@@ -384,6 +384,7 @@ def _existing_crop_target(target: dict[str, Any]) -> dict[str, Any]:
         raise FileNotFoundError(f"Existing segmentation crop not found: {path}")
     return {
         **target,
+        "path": str(path),
         "group_id": target["target_id"],
         "crop_path": str(path),
         "crop_sha256": _sha256(path),

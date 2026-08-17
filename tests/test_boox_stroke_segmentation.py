@@ -1,3 +1,4 @@
+import json
 from pathlib import Path
 from typing import Any
 
@@ -130,6 +131,14 @@ def test_source_crop_is_original_raster_and_deterministic(tmp_path: Path) -> Non
     second = segmentation._crop_group(image, group, tmp_path / "second", padding=2)
     assert first["crop_sha256"] == second["crop_sha256"]
     assert first["crop_bbox"] == {"left": 18, "top": 18, "right": 23, "bottom": 23}
+
+
+def test_existing_crop_target_is_json_serializable(tmp_path: Path) -> None:
+    crop = tmp_path / "crop.png"
+    Image.new("RGB", (10, 10), "white").save(crop)
+    target = segmentation._existing_crop_target({"target_id": "region-1", "path": crop})
+    json.dumps(target)
+    assert target["path"] == str(crop)
 
 
 def test_markdown_metrics_and_unresolved_are_deterministic() -> None:
