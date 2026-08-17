@@ -39,6 +39,50 @@ def test_stroke_groups_are_ordered_and_preserve_geometry() -> None:
     assert groups["rejected"][0]["reason"] == "line_below_minimum"
 
 
+def test_native_raster_mapping_accepts_exact_page() -> None:
+    mapping = segmentation._native_raster_mapping((1404, 1872))
+    assert mapping["native_dimensions"] == {"width": 1404, "height": 1872}
+    assert mapping["raster_dimensions"] == {"width": 1404, "height": 1872}
+    assert mapping["scale_x"] == mapping["scale_y"] == 1.0
+    assert mapping["uniform_scaling"] is True
+
+
+def test_native_raster_mapping_supports_proportional_downscale_and_upscale() -> None:
+    down = segmentation._native_raster_mapping((702, 936))
+    up = segmentation._native_raster_mapping((2808, 3744))
+    assert down["scale_x"] == down["scale_y"] == 0.5
+    assert up["scale_x"] == up["scale_y"] == 2.0
+
+
+def test_native_raster_mapping_rejects_incompatible_aspect_ratio() -> None:
+    try:
+        segmentation._native_raster_mapping((1000, 1000))
+    except ValueError as error:
+        assert "aspect ratio" in str(error)
+    else:
+        raise AssertionError("incompatible page aspect ratio was accepted")
+
+
+def test_native_bbox_mapping_is_deterministic() -> None:
+    mapping = segmentation._native_raster_mapping((702, 936))
+    native_bbox = {"left": 100.0, "top": 200.0, "right": 500.0, "bottom": 800.0}
+    expected = {"left": 50.0, "top": 100.0, "right": 250.0, "bottom": 400.0}
+    assert segmentation._map_bbox(native_bbox, mapping) == expected
+    assert segmentation._map_bbox(native_bbox, mapping) == expected
+
+
+def test_group_mapping_preserves_native_and_raster_provenance() -> None:
+    mapping = segmentation._native_raster_mapping((702, 936))
+    group = {
+        "group_id": "boox-line-001",
+        "native_bbox": {"left": 10.0, "top": 20.0, "right": 30.0, "bottom": 40.0},
+    }
+    mapped = segmentation._map_group(group, mapping)
+    assert mapped["native_bbox"] == group["native_bbox"]
+    assert mapped["raster_bbox"] == {"left": 5.0, "top": 10.0, "right": 15.0, "bottom": 20.0}
+    assert mapped["source_bbox"] == mapped["raster_bbox"]
+
+
 def test_horizontal_gap_splits_words_and_overlapping_strokes_stay_together() -> None:
     groups = segmentation.derive_boox_groups(
         [

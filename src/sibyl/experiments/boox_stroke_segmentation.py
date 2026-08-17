@@ -32,6 +32,7 @@ DEFAULT_OUTPUT = Path(".sibyl/experiments/stroke-segmentation.json")
 DEFAULT_RUNS = 1
 PAGE = 4
 NATIVE_SIZE = (1404, 1872)
+ASPECT_RATIO_TOLERANCE = 0.005
 DEFAULT_VERTICAL_GAP = 70.0
 DEFAULT_WORD_GAP = 55.0
 DEFAULT_MIN_STROKES = 2
@@ -39,6 +40,85 @@ DEFAULT_MIN_WIDTH = 8.0
 DEFAULT_MIN_HEIGHT = 8.0
 
 ReaderFactory = Callable[[Callable[[dict[str, Any]], None]], ExemplarReader]
+
+
+def _native_raster_mapping(
+    raster_size: tuple[int, int],
+    *,
+    aspect_ratio_tolerance: float = ASPECT_RATIO_TOLERANCE,
+) -> dict[str, Any]:
+    """Return the deterministic page-coordinate mapping for this raster."""
+    raster_width, raster_height = raster_size
+    native_width, native_height = NATIVE_SIZE
+    if raster_width <= 0 or raster_height <= 0:
+        raise ValueError("raster page dimensions must be positive")
+    if aspect_ratio_tolerance < 0:
+        raise ValueError("aspect-ratio tolerance must be non-negative")
+    native_ratio = native_width / native_height
+    raster_ratio = raster_width / raster_height
+    relative_error = abs(raster_ratio - native_ratio) / native_ratio
+    if relative_error > aspect_ratio_tolerance:
+        raise ValueError(
+            "raster page aspect ratio is incompatible with the verified BOOX page"
+        )
+    scale_x = raster_width / native_width
+    scale_y = raster_height / native_height
+    return {
+        "native_dimensions": {"width": native_width, "height": native_height},
+        "raster_dimensions": {"width": raster_width, "height": raster_height},
+        "scale_x": scale_x,
+        "scale_y": scale_y,
+        "aspect_ratio_tolerance": aspect_ratio_tolerance,
+        "aspect_ratio_relative_error": relative_error,
+        "uniform_scaling": scale_x == scale_y,
+        "coordinate_transform": "native-to-raster",
+    }
+
+
+def _map_bbox(
+    native_bbox: dict[str, float], mapping: dict[str, Any]
+) -> dict[str, float]:
+    """Map a native bbox into raster coordinates without changing its geometry."""
+    scale_x = float(mapping["scale_x"])
+    scale_y = float(mapping["scale_y"])
+    return {
+        "left": native_bbox["left"] * scale_x,
+        "top": native_bbox["top"] * scale_y,
+        "right": native_bbox["right"] * scale_x,
+        "bottom": native_bbox["bottom"] * scale_y,
+    }
+
+
+def _unmap_bbox(raster_bbox: dict[str, float], mapping: dict[str, Any]) -> dict[str, float]:
+    inverse = {
+        "scale_x": 1 / float(mapping["scale_x"]),
+        "scale_y": 1 / float(mapping["scale_y"]),
+    }
+    return _map_bbox(raster_bbox, inverse)
+
+
+def _map_group(group: dict[str, Any], mapping: dict[str, Any]) -> dict[str, Any]:
+    native_bbox = cast(dict[str, float], group["native_bbox"])
+    raster_bbox = _map_bbox(native_bbox, mapping)
+    return {
+        **group,
+        "native_bbox": native_bbox.copy(),
+        "raster_bbox": raster_bbox,
+        "source_bbox": raster_bbox.copy(),
+    }
+
+
+def _map_rejected(item: dict[str, Any], mapping: dict[str, Any]) -> dict[str, Any]:
+    native_bbox = item.get("bbox")
+    if not isinstance(native_bbox, dict):
+        return item
+    raster_bbox = _map_bbox(cast(dict[str, float], native_bbox), mapping)
+    return {
+        **item,
+        "native_bbox": dict(native_bbox),
+        "raster_bbox": raster_bbox,
+        "bbox": raster_bbox,
+    }
 
 
 def _sha256(path: Path) -> str:
@@ -277,7 +357,7 @@ def _crop_group(
     *,
     padding: int = 8,
 ) -> dict[str, Any]:
-    bounds = group["source_bbox"]
+    bounds = group.get("raster_bbox", group["source_bbox"])
     crop_bbox = {
         "left": max(0, round(bounds["left"] - padding)),
         "top": max(0, round(bounds["top"] - padding)),
@@ -469,8 +549,7 @@ def run_stroke_segmentation(
     if not image_path.is_file() or not note_path.is_file():
         raise FileNotFoundError("page image and BOOX note are required")
     with Image.open(image_path) as source:
-        if source.size != NATIVE_SIZE:
-            raise ValueError("stroke segmentation requires the verified 1404x1872 source image")
+        mapping = _native_raster_mapping(source.size)
         source_image = source.convert("RGB")
     native = inspect_boox_strokes(
         note_path, page=PAGE, output=output_path.parent / "stroke-segmentation" / "boox-strokes"
@@ -483,12 +562,23 @@ def run_stroke_segmentation(
     output_directory = output_path.parent / "stroke-segmentation"
     output_directory.mkdir(parents=True, exist_ok=True)
     figures = _canonical_figure_regions(image_path)
+    native_figures = [
+        {
+            **figure,
+            "bounds": _unmap_bbox(cast(dict[str, float], figure["bounds"]), mapping),
+        }
+        for figure in figures
+    ]
     groups = derive_boox_groups(
         native["strokes"],
         max_vertical_gap=max_vertical_gap,
         max_word_gap=max_word_gap,
-        figure_regions=figures,
+        figure_regions=native_figures,
     )
+    groups["lines"] = [_map_group(group, mapping) for group in groups["lines"]]
+    groups["words"] = [_map_group(group, mapping) for group in groups["words"]]
+    groups["rejected"] = [_map_rejected(item, mapping) for item in groups["rejected"]]
+    groups["parameters"]["coordinate_transform"] = mapping["coordinate_transform"]
     boox_lines = [
         _crop_group(source_image, group, output_directory / "boox-lines")
         for group in groups["lines"]
@@ -564,8 +654,9 @@ def run_stroke_segmentation(
             "dimensions": list(NATIVE_SIZE),
             "stroke_count": len(native["strokes"]),
             "point_count": sum(stroke.get("point_count", 0) for stroke in native["strokes"]),
-            "coordinate_transform": "identity",
+            "coordinate_transform": mapping["coordinate_transform"],
         },
+        "raster_page": mapping,
         "controls": {"runs": runs, "num_predict": num_predict, "num_ctx": num_ctx},
         "grouping": groups,
         "overlays": {

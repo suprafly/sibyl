@@ -12,6 +12,13 @@ deterministic vertical-center proximity and horizontal-gap heuristics. Their
 parameters, stroke provenance, identity source mapping, crop hashes, rejected
 groups, and reading order are recorded in the JSON artifact.
 
+The verified BOOX page remains 1404×1872 native coordinates. The supplied raster
+page is inspected at runtime and accepted when its aspect ratio is compatible;
+native group geometry is then deterministically scaled into raster coordinates.
+The artifact preserves both page dimensions, both scale factors, and native and
+raster bboxes. Crops and overlays always use pixels from the supplied original
+raster image.
+
 Run the human-owned page-4 experiment with one read per crop:
 
 ```fish
