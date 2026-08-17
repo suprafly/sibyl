@@ -9,3 +9,4 @@ This plain-Markdown tree contains repository-owned decisions, concepts, and arch
 - [Create an initial personal handwriting corpus](handwriting-corpus.md)
 - [Transcription variance experiment](transcription-variance.md)
 - [Targeted transcription reread experiment](transcription-reread.md)
+- [BOOX native-stroke-assisted recognition experiment](boox-recognition.md)

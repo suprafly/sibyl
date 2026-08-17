@@ -10,6 +10,22 @@ from pathlib import Path
 
 from sibyl import __version__
 from sibyl.corpus import format_corpus_result, prepare_boox_corpus
+from sibyl.experiments.boox_recognition import (
+    DEFAULT_IMAGE as BOOX_RECOGNITION_DEFAULT_IMAGE,
+)
+from sibyl.experiments.boox_recognition import (
+    DEFAULT_NOTE as BOOX_RECOGNITION_DEFAULT_NOTE,
+)
+from sibyl.experiments.boox_recognition import (
+    DEFAULT_OUTPUT as BOOX_RECOGNITION_DEFAULT_OUTPUT,
+)
+from sibyl.experiments.boox_recognition import (
+    DEFAULT_RUNS as BOOX_RECOGNITION_DEFAULT_RUNS,
+)
+from sibyl.experiments.boox_recognition import (
+    format_boox_recognition,
+    run_boox_recognition,
+)
 from sibyl.experiments.boox_strokes import (
     DEFAULT_NOTE as BOOX_STROKES_DEFAULT_NOTE,
 )
@@ -217,6 +233,32 @@ def build_parser() -> argparse.ArgumentParser:
     exemplars.add_argument("--review", type=Path, help="optional target review JSON")
     exemplars.add_argument(
         "--output", type=Path, default=HANDWRITING_EXEMPLARS_DEFAULT_OUTPUT, help="artifact path"
+    )
+    boox_recognition = experiment_commands.add_parser(
+        "boox-recognition",
+        help="measure whether native BOOX strokes help Qwen read page-4 handwriting",
+    )
+    boox_recognition.add_argument(
+        "image", type=Path, nargs="?", default=BOOX_RECOGNITION_DEFAULT_IMAGE, help="page-4 image"
+    )
+    boox_recognition.add_argument(
+        "--note", type=Path, default=BOOX_RECOGNITION_DEFAULT_NOTE, help="BOOX .note source"
+    )
+    boox_recognition.add_argument("--regions", help="comma-separated existing region IDs")
+    boox_recognition.add_argument(
+        "--lines", help="comma-separated existing line IDs (takes precedence)"
+    )
+    boox_recognition.add_argument(
+        "--runs", type=int, default=BOOX_RECOGNITION_DEFAULT_RUNS, help="reads per condition"
+    )
+    boox_recognition.add_argument(
+        "--review", type=Path, help="confirmed evaluation-only review JSON/YAML"
+    )
+    boox_recognition.add_argument(
+        "--output",
+        type=Path,
+        default=BOOX_RECOGNITION_DEFAULT_OUTPUT,
+        help="experimental JSON artifact",
     )
     knobs = experiment_commands.add_parser(
         "qwen-recognition-knobs",
@@ -444,6 +486,27 @@ def main(argv: Sequence[str] | None = None) -> int:
             print(f"sibyl: error: {error}", file=__import__("sys").stderr)
             return 2
         print(format_handwriting_exemplars(exemplar_result))
+    if arguments.command == "experiment" and arguments.experiment_name == "boox-recognition":
+        try:
+            recognition_result = run_boox_recognition(
+                arguments.image,
+                note_path=arguments.note,
+                regions=arguments.regions,
+                lines=arguments.lines,
+                runs=arguments.runs,
+                review_path=arguments.review,
+                output_path=arguments.output,
+            )
+        except (
+            FileNotFoundError,
+            RuntimeError,
+            ValueError,
+            OSError,
+            json.JSONDecodeError,
+        ) as error:
+            print(f"sibyl: error: {error}", file=__import__("sys").stderr)
+            return 2
+        print(format_boox_recognition(recognition_result))
     if arguments.command == "experiment" and arguments.experiment_name == "converge":
         try:
             convergence_result = run_convergence(
