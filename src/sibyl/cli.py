@@ -18,6 +18,16 @@ from sibyl.experiments.convergence import (
     format_convergence_result,
     run_convergence,
 )
+from sibyl.experiments.handwriting_exemplars import (
+    DEFAULT_OUTPUT as HANDWRITING_EXEMPLARS_DEFAULT_OUTPUT,
+)
+from sibyl.experiments.handwriting_exemplars import (
+    DEFAULT_RUNS as HANDWRITING_EXEMPLARS_DEFAULT_RUNS,
+)
+from sibyl.experiments.handwriting_exemplars import (
+    format_handwriting_exemplars,
+    run_handwriting_exemplars,
+)
 from sibyl.experiments.handwriting_preprocess import (
     DEFAULT_OUTPUT as HANDWRITING_PREPROCESS_DEFAULT_OUTPUT,
 )
@@ -132,6 +142,29 @@ def build_parser() -> argparse.ArgumentParser:
         type=Path,
         default=HANDWRITING_PREPROCESS_DEFAULT_OUTPUT,
         help="experimental JSON output path",
+    )
+    exemplars = experiment_commands.add_parser(
+        "handwriting-exemplars",
+        help="test Qwen handwriting recognition with same-writer visual examples",
+    )
+    exemplars.add_argument("image", type=Path, help="page image")
+    exemplars.add_argument("--regions", help="comma-separated existing region IDs")
+    exemplars.add_argument("--lines", help="comma-separated existing line IDs (takes precedence)")
+    exemplars.add_argument("--target-crop", type=Path, help="explicit existing target crop path")
+    exemplars.add_argument("--references", help="comma-separated reference IDs")
+    exemplars.add_argument(
+        "--reference-manifest", type=Path, help="JSON/YAML confirmed reference manifest"
+    )
+    exemplars.add_argument("--reference-set", help="explicit comma-separated reference-set IDs")
+    exemplars.add_argument(
+        "--runs",
+        type=int,
+        default=HANDWRITING_EXEMPLARS_DEFAULT_RUNS,
+        help="runs per reference set",
+    )
+    exemplars.add_argument("--review", type=Path, help="optional target review JSON")
+    exemplars.add_argument(
+        "--output", type=Path, default=HANDWRITING_EXEMPLARS_DEFAULT_OUTPUT, help="artifact path"
     )
     knobs = experiment_commands.add_parser(
         "qwen-recognition-knobs",
@@ -272,12 +305,10 @@ def main(argv: Sequence[str] | None = None) -> int:
                 temperatures = tuple(
                     float(value) for value in arguments.temperatures.split(",") if value
                 )
-                top_ps = tuple(
-                    float(value) for value in arguments.top_p.split(",") if value
+                top_ps = tuple(float(value) for value in arguments.top_p.split(",") if value)
+                seeds = tuple(int(value) for value in arguments.seeds.split(",") if value) or (
+                    None,
                 )
-                seeds = tuple(
-                    int(value) for value in arguments.seeds.split(",") if value
-                ) or (None,)
             contexts = (
                 tuple(value.strip() for value in arguments.contexts.split(",") if value.strip())
                 if arguments.contexts
@@ -311,6 +342,30 @@ def main(argv: Sequence[str] | None = None) -> int:
             print(f"sibyl: error: {error}", file=__import__("sys").stderr)
             return 2
         print(format_qwen_recognition_knobs(knobs_result))
+    if arguments.command == "experiment" and arguments.experiment_name == "handwriting-exemplars":
+        try:
+            exemplar_result = run_handwriting_exemplars(
+                arguments.image,
+                regions=arguments.regions,
+                lines=arguments.lines,
+                target_crop=arguments.target_crop,
+                references=arguments.references,
+                reference_manifest=arguments.reference_manifest,
+                reference_set=arguments.reference_set,
+                runs=arguments.runs,
+                review_path=arguments.review,
+                output_path=arguments.output,
+            )
+        except (
+            FileNotFoundError,
+            RuntimeError,
+            ValueError,
+            OSError,
+            json.JSONDecodeError,
+        ) as error:
+            print(f"sibyl: error: {error}", file=__import__("sys").stderr)
+            return 2
+        print(format_handwriting_exemplars(exemplar_result))
     if arguments.command == "experiment" and arguments.experiment_name == "converge":
         try:
             convergence_result = run_convergence(

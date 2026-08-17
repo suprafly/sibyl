@@ -1,0 +1,23 @@
+# Human-confirmed same-page reference crops for the first manual experiment.
+# The target line is intentionally absent from this manifest.
+references:
+  - id: reference-xylem
+    crop: ../../.sibyl/experiments/transcription-reread/region-02-line-01.png
+    source_bbox: {left: 527, top: 834, right: 650, bottom: 1038}
+    transcription: "Xylem"
+    confirmed: true
+  - id: reference-transports
+    crop: ../../.sibyl/experiments/transcription-reread/region-02-line-02.png
+    source_bbox: {left: 414, top: 838, right: 3895, bottom: 1165}
+    transcription: "- transports mineral nutrients"
+    confirmed: true
+  - id: reference-water
+    crop: ../../.sibyl/experiments/transcription-reread/region-02-line-03.png
+    source_bbox: {left: 624, top: 1123, right: 3680, bottom: 1357}
+    transcription: "and water from root to"
+    confirmed: true
+  - id: reference-phloem
+    crop: ../../.sibyl/experiments/transcription-reread/region-03-line-01.png
+    source_bbox: {left: 400, top: 1766, right: 1196, bottom: 2064}
+    transcription: "Phloem"
+    confirmed: true
