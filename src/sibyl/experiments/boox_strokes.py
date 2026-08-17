@@ -16,6 +16,7 @@ from typing import Any
 from PIL import Image, ImageChops, ImageDraw
 
 from sibyl.corpus import read_boox_metadata
+from sibyl.experiments.boox_external_probe import probe_points, render_probe_strokes
 from sibyl.experiments.boox_forensics import write_page_forensics
 
 UUID_RE = re.compile(
@@ -146,6 +147,20 @@ def inspect_boox_strokes(
         resource["preserved_path"] = str(preserved_path)
         raw_resources.append(resource)
     forensics = write_page_forensics(note_path, page=page, output=output)
+    shape_ids = [
+        value
+        for record in forensics["shape_records_observed"]["records"]
+        for value in record["fields"].get("1", [])
+        if isinstance(value, str)
+    ]
+    point_name, point_data = next(iter(point_ids.values()))
+    external_probe = probe_points(
+        point_data,
+        page_id=page_id,
+        point_resource_id=Path(point_name).name.split("#")[1],
+        page_size=(selected["width"], selected["height"]),
+        shape_ids=shape_ids,
+    )
     for order, (shape_name, shape_data) in enumerate(shapes):
         shape_id = Path(shape_name).name.split("#")[1]
         referenced = [uid for uid in _uuids(shape_data) if uid in point_ids]
@@ -153,10 +168,10 @@ def inspect_boox_strokes(
         if not candidate_ids:
             candidate_ids.append(None)
         for point_id in candidate_ids:
-            point_data = point_ids[point_id][1] if point_id else None
+            candidate_data = point_ids[point_id][1] if point_id else None
             decoded, encoding = (
-                _decode_points(point_data, selected["width"], selected["height"])
-                if point_data
+                _decode_points(candidate_data, selected["width"], selected["height"])
+                if candidate_data
                 else ([], "no_point_resource")
             )
             if not decoded:
@@ -172,8 +187,8 @@ def inspect_boox_strokes(
                     "native_bounds": _bounds(decoded),
                     "mapped_bounds": _bounds(decoded),
                     "pen": {"metadata": "not_confidently_decoded"},
-                    "source_resource_sha256": _sha256(point_data)
-                    if point_data
+                    "source_resource_sha256": _sha256(candidate_data)
+                    if candidate_data
                     else _sha256(shape_data),
                     "coordinate_mapping": {
                         "type": "identity",
@@ -211,6 +226,22 @@ def inspect_boox_strokes(
     )
     _draw(native_path, size, strokes)
     _draw(strokes_path, size, strokes)
+    if external_probe["status"] == "matched":
+        render_probe_strokes(native_path, size, external_probe["strokes"])
+        render_probe_strokes(strokes_path, size, external_probe["strokes"])
+        strokes = [
+            {
+                **stroke,
+                "order": order,
+                "native_points": stroke["points"],
+                "mapped_points": stroke["points"],
+                "native_bounds": stroke["bounds"],
+                "mapped_bounds": stroke["bounds"],
+                "point_resource_id": external_probe["schema"].get("point_resource_id"),
+                "coordinate_mapping": {"type": "identity", "confidence": "external_schema_match"},
+            }
+            for order, stroke in enumerate(external_probe["strokes"])
+        ]
     pdf_image = output / f"page-{page:03d}-pdf.png"
     comparison: dict[str, Any] = {"pdf_rendered": False}
     if pdf_path and pdf_path.is_file() and _pdf_page(pdf_path, page, pdf_image, size):
@@ -234,6 +265,7 @@ def inspect_boox_strokes(
         "source_pdf_sha256": _sha256(pdf_path.read_bytes()) if pdf_path else None,
         "resources": raw_resources,
         "strokes": strokes,
+        "external_probe": external_probe,
         "raw_resource_preservation": True,
         "reconstruction": {
             "native_dimensions": list(size),
