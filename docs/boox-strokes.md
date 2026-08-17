@@ -13,6 +13,16 @@ resource IDs and raw hashes. The point binary encoding is intentionally only
 decoded when every record passes conservative page-bound checks. Otherwise the
 raw resource is preserved and the metadata says decoding is incomplete.
 
+Each run also writes a page forensic dump and byte-for-byte raw resources. On
+the verified page-4 specimen, the shape entry is a ZIP containing a complete
+wire-parseable stream with 167 repeated field-1 records. Its observed nested
+fields include the point-resource ID, shape ID, timestamps, JSON bounds, and
+pen metadata. The point resource has a fixed prefix containing the page ID and
+point-resource ID, followed by a repeated 16-byte-aligned region. Big-endian
+float pairs occur in plausible page ranges, but multiple record layouts and
+stroke boundaries remain unresolved; no coordinate hypothesis is accepted by
+the experiment.
+
 Run the page-4 experiment with:
 
 ```sh
@@ -25,6 +35,10 @@ Inspect the JSON with `jq . .sibyl/experiments/boox-strokes.json` and
 `jq . .sibyl/experiments/boox-strokes/page-004-metadata.json`; view
 `page-004-native.png`, `page-004-strokes.png`, and any overlay/diff PNG in an
 image viewer.
+
+The forensic files are `page-004-forensics.json`,
+`page-004-point-resource.bin`, and `page-004-shape-resource.bin`. The JSON
+distinguishes wire-format observations from semantic coordinate hypotheses.
 
 The corpus manifest is used for page mapping when its ordered page IDs confirm
 the selected page. Any coordinate transform is recorded explicitly. Rendering

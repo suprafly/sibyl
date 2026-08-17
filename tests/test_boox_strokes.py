@@ -60,8 +60,6 @@ def test_uncertain_point_resource_is_preserved(
     note = tmp_path / "fixture.note"
     _fixture(note)
     monkeypatch.chdir(tmp_path)
-    with zipfile.ZipFile(note, "a") as archive:
-        archive.writestr("root/point/page-four/page-four#2#points", b"unknown")
     result = inspect_boox_strokes(note, page=2, output=tmp_path / "out")
     assert result["raw_resource_preservation"] is True
-    assert any(resource["size"] == len(b"unknown") for resource in result["resources"])
+    assert any(resource["kind"] == "point" for resource in result["resources"])

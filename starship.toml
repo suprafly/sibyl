@@ -1,0 +1,17 @@
+"$schema" = 'https://starship.rs/config-schema.json'
+
+add_newline = false
+format = "$directory$git_branch$custom.vpn$character"
+
+[character]
+success_symbol = '[▶](fg:#6237ec)[▶](fg:#7049ed)[▶](fg:#7e5bef)'
+error_symbol = '[▶](fg:#ff0a0a)[▶](fg:#ff1e1e)[▶](fg:#ff3131)'
+
+[custom.vpn]
+command = "fish -c vpn-country"
+when = "wg show interfaces >/dev/null 2>&1"
+format = "[$output]($style) "
+style = "bold blue"
+
+[package]
+disabled = true

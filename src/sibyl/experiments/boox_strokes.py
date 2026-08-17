@@ -16,6 +16,7 @@ from typing import Any
 from PIL import Image, ImageChops, ImageDraw
 
 from sibyl.corpus import read_boox_metadata
+from sibyl.experiments.boox_forensics import write_page_forensics
 
 UUID_RE = re.compile(
     rb"[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}"
@@ -144,6 +145,7 @@ def inspect_boox_strokes(
         preserved_path.write_bytes(data)
         resource["preserved_path"] = str(preserved_path)
         raw_resources.append(resource)
+    forensics = write_page_forensics(note_path, page=page, output=output)
     for order, (shape_name, shape_data) in enumerate(shapes):
         shape_id = Path(shape_name).name.split("#")[1]
         referenced = [uid for uid in _uuids(shape_data) if uid in point_ids]
@@ -241,6 +243,11 @@ def inspect_boox_strokes(
         },
         "comparison": comparison,
         "warnings": sorted(set(warnings)),
+        "forensics": {
+            "artifact": str(output / f"page-{page:03d}-forensics.json"),
+            "point_wire_candidate_count": forensics["wire_format"]["point_candidate_count"],
+            "shape_wire_candidate_count": forensics["wire_format"]["shape_candidate_count"],
+        },
     }
     metadata_path = output / f"page-{page:03d}-metadata.json"
     metadata_path.write_text(
