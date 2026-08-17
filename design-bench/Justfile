@@ -1,0 +1,14 @@
+setup:
+    npm install
+
+dev:
+    npm run dev --
+
+check:
+    npm run check
+
+test:
+    npm run test
+
+build:
+    npm run build

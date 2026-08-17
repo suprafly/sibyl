@@ -1,0 +1,25 @@
+version: 1
+materialized:
+  applications:
+    {}
+  development_surfaces:
+    "development-surface:design-bench":
+      declaration_fingerprint: "sha256:31ea02a714be2d4ed0738555a595a900a01fb6515c8d6e01bb8aee4593c7c743"
+  platforms:
+    {}
+  native_hosts:
+    {}
+  field_presses:
+    {}
+  folds:
+    {}
+  fold_versions:
+    {}
+  machinery:
+    {}
+  design_projections:
+    "design-projection:design-bench":
+      target: "design-bench"
+      declaration_fingerprint: "sha256:56b85b5c334a45db3039fe247896c44535aae7a0318a2fc22fb4901ae1908500"
+  bindings:
+    {}

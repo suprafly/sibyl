@@ -1,0 +1,155 @@
+version: 1
+default_theme: sibyl
+default_appearance: dark
+
+primitives:
+  colors:
+    oracle_blue_dark: "#1FB3FF"
+    oracle_blue_light: "#146A9C"
+    canvas_dark: "#071A20"
+    surface_dark: "#0D2931"
+    surface_dark_elevated: "#123943"
+    canvas_light: "#F4FBFC"
+    surface_light: "#FFFFFF"
+    surface_light_elevated: "#E8F5F7"
+    content_dark: "#F1FEFF"
+    content_dark_secondary: "#B8DADF"
+    content_dark_muted: "#7DA8AE"
+    content_light: "#102126"
+    content_light_secondary: "#31515A"
+    content_light_muted: "#55727A"
+    border_dark: "#2A5962"
+    border_light: "#A9C9CE"
+    ink: "#061215"
+    white: "#FFFFFF"
+    info_container_dark: "#123B45"
+    info_container_light: "#D8F3F5"
+    success: "#2AAE83"
+    warning: "#B97811"
+    danger: "#B83A52"
+
+  spacing:
+    sm: {value: 8, unit: logical_pixel}
+    md: {value: 16, unit: logical_pixel}
+    lg: {value: 24, unit: logical_pixel}
+  radii:
+    standard: {value: 8, unit: logical_pixel}
+  border_widths:
+    standard: {value: 1, unit: logical_pixel}
+  shadows:
+    low:
+      color: "{colors.ink}"
+      offset_x: {value: 0, unit: logical_pixel}
+      offset_y: {value: 2, unit: logical_pixel}
+      blur: {value: 10, unit: logical_pixel}
+      spread: {value: 0, unit: logical_pixel}
+  breakpoints:
+    compact: {value: 480, unit: logical_pixel}
+  content_widths:
+    reading: {value: 720, unit: logical_pixel}
+  font_families:
+    primary:
+      faces:
+        - asset: fonts/primary.ttf
+          weight: 400
+          style: normal
+
+  typography:
+    display: {font_family: primary, size: {value: 40, unit: logical_pixel}, line_height: 1.1, weight: 700}
+    heading: {font_family: primary, size: {value: 30, unit: logical_pixel}, line_height: 1.2, weight: 700}
+    title: {font_family: primary, size: {value: 22, unit: logical_pixel}, line_height: 1.3, weight: 700}
+    body: {font_family: primary, size: {value: 16, unit: logical_pixel}, line_height: 1.5, weight: 400}
+    label: {font_family: primary, size: {value: 14, unit: logical_pixel}, line_height: 1.4, weight: 700}
+    code: {font_family: primary, size: {value: 14, unit: logical_pixel}, line_height: 1.5, weight: 400}
+
+themes:
+  sibyl:
+    typography:
+      display: "{typography.display}"
+      heading: "{typography.heading}"
+      title: "{typography.title}"
+      body: "{typography.body}"
+      label: "{typography.label}"
+      code: "{typography.code}"
+    light:
+      colors:
+        canvas: "{colors.canvas_light}"
+        surface.primary: "{colors.surface_light}"
+        surface.secondary: "{colors.canvas_light}"
+        surface.elevated: "{colors.surface_light_elevated}"
+        content.primary: "{colors.content_light}"
+        content.secondary: "{colors.content_light_secondary}"
+        content.muted: "{colors.content_light_muted}"
+        accent.primary: "{colors.oracle_blue_light}"
+        accent.on_primary: "{colors.white}"
+        accent.secondary: "{colors.oracle_blue_light}"
+        accent.on_secondary: "{colors.white}"
+        border.subtle: "{colors.border_light}"
+        border.default: "{colors.content_light_secondary}"
+        border.strong: "{colors.content_light}"
+        feedback.info.base: "{colors.oracle_blue_light}"
+        feedback.info.content: "{colors.oracle_blue_light}"
+        feedback.info.container: "{colors.info_container_light}"
+        feedback.info.on_container: "{colors.content_light}"
+        feedback.success.base: "{colors.success}"
+        feedback.success.content: "{colors.content_light}"
+        feedback.success.container: "{colors.info_container_light}"
+        feedback.success.on_container: "{colors.content_light}"
+        feedback.warning.base: "{colors.warning}"
+        feedback.warning.content: "{colors.content_light}"
+        feedback.warning.container: "{colors.info_container_light}"
+        feedback.warning.on_container: "{colors.content_light}"
+        feedback.danger.base: "{colors.danger}"
+        feedback.danger.content: "{colors.content_light}"
+        feedback.danger.container: "{colors.info_container_light}"
+        feedback.danger.on_container: "{colors.content_light}"
+        focus.ring: "{colors.oracle_blue_light}"
+        selection.fill: "{colors.oracle_blue_light}"
+        selection.content: "{colors.white}"
+        selection.border: "{colors.oracle_blue_light}"
+        disabled.content: "{colors.content_light_muted}"
+        disabled.surface: "{colors.surface_light_elevated}"
+      custom:
+        colors:
+          identity.oracle_blue: "{colors.oracle_blue_light}"
+    dark:
+      colors:
+        canvas: "{colors.canvas_dark}"
+        surface.primary: "{colors.surface_dark}"
+        surface.secondary: "{colors.canvas_dark}"
+        surface.elevated: "{colors.surface_dark_elevated}"
+        content.primary: "{colors.content_dark}"
+        content.secondary: "{colors.content_dark_secondary}"
+        content.muted: "{colors.content_dark_muted}"
+        accent.primary: "{colors.oracle_blue_dark}"
+        accent.on_primary: "{colors.ink}"
+        accent.secondary: "{colors.oracle_blue_dark}"
+        accent.on_secondary: "{colors.ink}"
+        border.subtle: "{colors.border_dark}"
+        border.default: "{colors.content_dark_secondary}"
+        border.strong: "{colors.content_dark}"
+        feedback.info.base: "{colors.oracle_blue_dark}"
+        feedback.info.content: "{colors.content_dark}"
+        feedback.info.container: "{colors.info_container_dark}"
+        feedback.info.on_container: "{colors.content_dark}"
+        feedback.success.base: "{colors.success}"
+        feedback.success.content: "{colors.content_dark}"
+        feedback.success.container: "{colors.info_container_dark}"
+        feedback.success.on_container: "{colors.content_dark}"
+        feedback.warning.base: "{colors.warning}"
+        feedback.warning.content: "{colors.content_dark}"
+        feedback.warning.container: "{colors.info_container_dark}"
+        feedback.warning.on_container: "{colors.content_dark}"
+        feedback.danger.base: "{colors.danger}"
+        feedback.danger.content: "{colors.content_dark}"
+        feedback.danger.container: "{colors.info_container_dark}"
+        feedback.danger.on_container: "{colors.content_dark}"
+        focus.ring: "{colors.oracle_blue_dark}"
+        selection.fill: "{colors.oracle_blue_dark}"
+        selection.content: "{colors.ink}"
+        selection.border: "{colors.oracle_blue_dark}"
+        disabled.content: "{colors.content_dark_muted}"
+        disabled.surface: "{colors.surface_dark_elevated}"
+      custom:
+        colors:
+          identity.oracle_blue: "{colors.oracle_blue_dark}"

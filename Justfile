@@ -31,4 +31,4 @@ check: venv
     UV_CACHE_DIR=/tmp/sibyl-uv-cache uv run mypy
 
 run *ARGS: venv
-    UV_CACHE_DIR=/tmp/sibyl-uv-cache uv run sibyl run {{ARGS}}
+    @case "{{ARGS}}" in design-bench) npm --prefix design-bench run dev -- ;; *) UV_CACHE_DIR=/tmp/sibyl-uv-cache uv run sibyl run {{ARGS}} ;; esac

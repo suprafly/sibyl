@@ -3,10 +3,14 @@ version: 1
 system:
   name: sibyl
 
+design: design/system.yml
+
 applications:
   sibyl:
     type: cli
     path: .
     executable: bin/sibyl
+    design:
+      theme: sibyl
 
 bindings: []
